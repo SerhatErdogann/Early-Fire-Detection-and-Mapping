@@ -319,7 +319,7 @@ def main():
     import os
     
 
-    video_path = "RGBVideo6-D.mp4"  
+    video_path = "video.mp4"  
     
     # Başlangıç koordinatları
     start_latitude = 39.971122237497404
