@@ -1,0 +1,19 @@
+# Wildfire detection (RGB + Thermal) - flame_fire_project
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.21.0
+pandas>=1.3.0
+pyarrow>=10.0.0
+opencv-python>=4.5.0
+Pillow>=9.0.0
+scikit-learn>=1.0.0
+tqdm>=4.60.0
+
+# Optional: Gradio app (03_app.py)
+gradio>=4.0.0
+
+# Optional: CAM heatmaps (05_video_infer, 03_app, 04_export_intensity)
+torchcam>=0.2.0
+
+# Optional: Keras video inference (05_video_infer_h5)
+# tensorflow>=2.10.0

@@ -1,0 +1,143 @@
+# Video inference (RGB or RGB+thermal). Run from project root: python src/05_video_infer.py --rgb_video <path> [--th_video <path>]
+import argparse
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.inference.video import run_video_inference
+
+try:
+    from config import CKPT_FUSION, CKPT_RGB, CKPT_THERMAL, INFERENCE_DEFAULT, OUTPUTS_DIR
+except ImportError:
+    CKPT_FUSION = Path("models/fusion.pt")
+    CKPT_RGB = Path("models/rgb.pt")
+    CKPT_THERMAL = Path("models/thermal.pt")
+    INFERENCE_DEFAULT = {
+        "smooth_window": 5,
+        "ema_alpha": 0.3,
+        "use_tta": False,
+        "step_frames": 5,
+        "scene_thresh": 0.10,
+        "scene_conf_scale": 0.7,
+        "hyst_high": 0.7,
+        "hyst_low": 0.4,
+        "persist_n": 5,
+        "min_component_area": 0.01,
+        "growth_downscale": 0.85,
+        "kl_hist_thresh": 0.35,
+    }
+    OUTPUTS_DIR = Path("outputs")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rgb_video", required=True)
+    ap.add_argument("--th_video", default=None)
+    ap.add_argument("--step", type=int, default=INFERENCE_DEFAULT.get("step_frames", 5))
+    ap.add_argument("--smooth_win", type=int, default=INFERENCE_DEFAULT.get("smooth_window", 5))
+    ap.add_argument("--ema_alpha", type=float, default=INFERENCE_DEFAULT.get("ema_alpha", 0.3))
+    ap.add_argument("--tta", action="store_true", help="Test-time augmentation (horizontal flip)")
+    ap.add_argument("--override_thr", type=float, default=None)
+    ap.add_argument("--size", type=int, default=384)
+    ap.add_argument("--model_fusion", default=str(CKPT_FUSION))
+    ap.add_argument("--model_rgb", default=str(CKPT_RGB))
+    ap.add_argument("--model_thermal", default=str(CKPT_THERMAL))
+    ap.add_argument("--out", default=str(OUTPUTS_DIR / "video_predictions.csv"))
+    ap.add_argument("--save_heatmaps", action="store_true")
+    ap.add_argument("--save_masks", action="store_true", help="Save EMA-smoothed soft mask PNGs")
+    ap.add_argument("--save_polygons", action="store_true", help="Save per-frame centroid JSON (mask-based)")
+    ap.add_argument(
+        "--cam-stats",
+        action="store_true",
+        help="Run Grad-CAM each frame for area/growth (no PNG); enables spatial filters. Slower than plain infer.",
+    )
+    ap.add_argument(
+        "--fp16",
+        action="store_true",
+        help="CUDA half-precision forward (faster; no effect without GPU). Skipped when saving heatmaps/masks.",
+    )
+    ap.add_argument("--mode", choices=["auto", "rgb", "thermal", "fusion"], default="auto")
+    idf = INFERENCE_DEFAULT
+    ap.add_argument(
+        "--no-temporal-guard",
+        action="store_true",
+        help="Disable scene change / hysteresis / N-frame fire_event (legacy).",
+    )
+    ap.add_argument("--scene-thresh", type=float, default=idf.get("scene_thresh", 0.10))
+    ap.add_argument("--scene-confidence-scale", type=float, default=idf.get("scene_conf_scale", 0.7))
+    ap.add_argument("--hyst-high", type=float, default=idf.get("hyst_high", 0.7))
+    ap.add_argument("--hyst-low", type=float, default=idf.get("hyst_low", 0.4))
+    ap.add_argument("--persist-n", type=int, default=idf.get("persist_n", 5))
+    ap.add_argument("--min-area", type=float, default=idf.get("min_component_area", 0.01))
+    ap.add_argument("--growth-downscale", type=float, default=idf.get("growth_downscale", 0.85))
+    ap.add_argument("--kl-scene", action="store_true", help="Also trigger scene reset on RGB histogram KL jump")
+    ap.add_argument("--kl-hist-thresh", type=float, default=idf.get("kl_hist_thresh", 0.35))
+    ap.add_argument("--early-detection", action="store_true", default=idf.get("early_detection", False))
+    ap.add_argument("--early-thr-shift", type=float, default=idf.get("early_threshold_shift", 0.15))
+    ap.add_argument("--early-min-thr", type=float, default=idf.get("early_min_threshold", 0.25))
+    ap.add_argument("--early-persist-n", type=int, default=idf.get("early_persist_n", 2))
+    ap.add_argument("--small-fire-boost", type=float, default=idf.get("small_fire_boost", 1.3))
+    ap.add_argument("--small-fire-area-max", type=float, default=idf.get("small_fire_area_max", 0.02))
+    ap.add_argument("--growth-upscale", type=float, default=idf.get("growth_upscale", 1.2))
+    ap.add_argument("--texture-prob-max", type=float, default=idf.get("texture_prob_max", 0.2))
+    ap.add_argument("--texture-top10-min", type=float, default=idf.get("texture_top10_min", 0.7))
+    ap.add_argument("--modal-agreement", action="store_true", default=idf.get("enable_modal_agreement", False))
+    ap.add_argument("--modal-min-corr", type=float, default=idf.get("modal_agreement_min_corr", 0.2))
+    ap.add_argument("--modal-penalty", type=float, default=idf.get("modal_agreement_penalty", 0.6))
+    args = ap.parse_args()
+
+    if args.mode == "auto":
+        ckpt = args.model_fusion if args.th_video else args.model_rgb
+    elif args.mode == "fusion":
+        ckpt = args.model_fusion
+    elif args.mode == "thermal":
+        ckpt = args.model_thermal
+    else:
+        ckpt = args.model_rgb
+
+    out_csv = run_video_inference(
+        args.rgb_video,
+        th_video_path=args.th_video,
+        ckpt_path=ckpt,
+        mode=args.mode,
+        size=args.size,
+        step_frames=args.step,
+        smooth_window=args.smooth_win,
+        ema_alpha=args.ema_alpha,
+        use_tta=args.tta,
+        override_thr=args.override_thr,
+        save_heatmaps=args.save_heatmaps,
+        save_masks=args.save_masks,
+        save_polygons=args.save_polygons,
+        out_csv=args.out,
+        use_fp16=args.fp16
+        and not (args.save_heatmaps or args.save_masks or args.save_polygons or args.cam_stats),
+        cam_stats_only=args.cam_stats,
+        temporal_guard=not args.no_temporal_guard,
+        scene_thresh=args.scene_thresh,
+        scene_conf_scale=args.scene_confidence_scale,
+        hyst_high=args.hyst_high,
+        hyst_low=args.hyst_low,
+        persist_n=args.persist_n,
+        min_component_area=args.min_area,
+        growth_downscale=args.growth_downscale,
+        use_kl_scene=args.kl_scene,
+        kl_hist_thresh=args.kl_hist_thresh,
+        early_detection=args.early_detection,
+        early_threshold_shift=args.early_thr_shift,
+        early_min_threshold=args.early_min_thr,
+        early_persist_n=args.early_persist_n,
+        small_fire_boost=args.small_fire_boost,
+        small_fire_area_max=args.small_fire_area_max,
+        growth_upscale=args.growth_upscale,
+        texture_prob_max=args.texture_prob_max,
+        texture_top10_min=args.texture_top10_min,
+        enable_modal_agreement=args.modal_agreement,
+        modal_agreement_min_corr=args.modal_min_corr,
+        modal_agreement_penalty=args.modal_penalty,
+    )
+    print("Output written:", out_csv)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# Data / artifacts (large)
+data/
+data.rar
+outputs/
+
+# Models (can be large)
+models/
+*.pt
+*.h5
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
