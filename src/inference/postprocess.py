@@ -4,6 +4,7 @@ Spatial stats from a soft map (segmentation prob or CAM), for GIS-style metrics.
 from __future__ import annotations
 
 import numpy as np
+import cv2
 
 
 def stats_from_soft_map(cam: np.ndarray, thr_soft: float = 0.3, thr_bin: float = 0.5) -> dict:
@@ -18,7 +19,12 @@ def stats_from_soft_map(cam: np.ndarray, thr_soft: float = 0.3, thr_bin: float =
     soft_area = float((cam >= thr_soft).mean())
     hard_area = float((cam >= thr_bin).mean())
     k = max(1, int(0.01 * n))
-    peak_intensity = float(np.mean(np.sort(m)[-k:]))
+    # Faster than full sort: take top-k via partition.
+    if m.size:
+        topk = np.partition(m, m.size - k)[-k:]
+        peak_intensity = float(np.mean(topk))
+    else:
+        peak_intensity = 0.0
     bin_mask = (cam >= thr_bin).astype(np.uint8)
     num_components, labels, areas, centroids = _connected_components(bin_mask)
     largest = float(max(areas)) if areas else 0.0
@@ -56,6 +62,21 @@ def _edge_density(mask: np.ndarray) -> float:
 
 
 def _connected_components(mask: np.ndarray):
+    try:
+        n_labels, labels, stats, centroids_xy = cv2.connectedComponentsWithStats(
+            mask.astype(np.uint8), connectivity=4
+        )
+        if n_labels <= 1:
+            return 0, labels.astype(np.int32), [], []
+        areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64).tolist()
+        centroids = [
+            (float(centroids_xy[i, 1]), float(centroids_xy[i, 0]))
+            for i in range(1, n_labels)
+        ]
+        return int(n_labels - 1), labels.astype(np.int32), areas, centroids
+    except Exception:
+        pass
+
     h, w = mask.shape
     labels = np.zeros_like(mask, dtype=np.int32)
     current = 0

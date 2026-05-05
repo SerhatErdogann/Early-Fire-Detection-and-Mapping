@@ -7,9 +7,11 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 
-import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
     from config import OUTPUTS_DIR, RISK_WEIGHTS, RISK_SCORE_WEIGHTS, FIRE_EVENT_THR, FIRE_EVENT_MIN_RUN
@@ -26,8 +28,16 @@ except ImportError:
     FIRE_EVENT_THR = 0.85
     FIRE_EVENT_MIN_RUN = 5
 
+from src.risk.scoring import build_risk_table
+
 DEFAULT_INP = OUTPUTS_DIR / "video_predictions.csv"
 DEFAULT_OUT = OUTPUTS_DIR / "video_predictions_scored.csv"
+
+
+def _series_or_default(df: pd.DataFrame, col: str, default: float = 0.0) -> pd.Series:
+    if col in df.columns:
+        return pd.to_numeric(df[col], errors="coerce").fillna(default)
+    return pd.Series(float(default), index=df.index, dtype="float64")
 
 
 def _load_temperature_from_ckpt(ckpt_path: Path | None) -> float:
@@ -54,38 +64,30 @@ def main():
     ckpt = Path(args.ckpt) if args.ckpt else None
     T = _load_temperature_from_ckpt(ckpt)
 
-    # Without logits, use prob_fire as calibrated proxy (temperature stored for reference)
-    df["prob_fire_cal"] = df["prob_fire"].astype(float)
-
-    if "peak_intensity" not in df.columns:
-        df["peak_intensity"] = df.get("intensity_top10", df["prob_fire"])
-    if "largest_component_area" not in df.columns:
-        df["largest_component_area"] = df.get("area_heat_gt_0_6", 0.0)
-    if "mask_growth_rate" not in df.columns:
-        df["mask_growth_rate"] = df.get("growth_rate", 0.0)
-
     df = df.sort_values("frame_idx").reset_index(drop=True)
-    thr_p = 0.5
-    ser = (df["prob_fire"].astype(float) >= thr_p).astype(float)
-    df["temporal_persistence"] = ser.rolling(int(args.persistence_win), min_periods=1).mean().fillna(0.0)
-
+    if "threshold_used" in df.columns:
+        thr_p = float(pd.to_numeric(df["threshold_used"], errors="coerce").dropna().median())
+    else:
+        thr_p = 0.5
     w_new = {k: float(v) for k, v in RISK_SCORE_WEIGHTS.items()}
-    df["risk_score"] = (
-        w_new.get("prob_fire_cal", 0.35) * df["prob_fire_cal"].astype(float)
-        + w_new.get("peak_intensity", 0.2) * df["peak_intensity"].astype(float)
-        + w_new.get("largest_component_area", 0.2) * df["largest_component_area"].astype(float)
-        + w_new.get("temporal_persistence", 0.15) * df["temporal_persistence"].astype(float)
-        + w_new.get("mask_growth_rate", 0.1) * np.maximum(df["mask_growth_rate"].astype(float), 0.0)
+    df, risk_meta = build_risk_table(
+        df,
+        risk_weights=w_new,
+        persistence_win=int(args.persistence_win),
+        persistence_thr=float(thr_p),
     )
 
+    intensity_legacy = (
+        _series_or_default(df, "intensity_top10", default=0.0)
+        if "intensity_top10" in df.columns
+        else _series_or_default(df, "prob_fire", default=0.0)
+    )
+    area_legacy = _series_or_default(df, "area_heat_gt_0_6", default=0.0)
     df["risk_score_legacy"] = (
-        float(RISK_WEIGHTS.get("prob_fire", 0.6)) * df["prob_fire"].astype(float)
-        + float(RISK_WEIGHTS.get("intensity_top10", 0.25)) * df.get("intensity_top10", df["prob_fire"]).astype(float)
-        + float(RISK_WEIGHTS.get("area_heat_gt_0_6", 0.15)) * df.get("area_heat_gt_0_6", 0.0).astype(float)
+        float(RISK_WEIGHTS.get("prob_fire", 0.6)) * _series_or_default(df, "prob_fire", default=0.0)
+        + float(RISK_WEIGHTS.get("intensity_top10", 0.25)) * intensity_legacy
+        + float(RISK_WEIGHTS.get("area_heat_gt_0_6", 0.15)) * area_legacy
     )
-
-    mx = df["risk_score"].max()
-    df["risk_score_norm"] = df["risk_score"] / (mx + 1e-9)
 
     use_infer_fire = (
         "infer_temporal_applied" in df.columns and int(df["infer_temporal_applied"].iloc[0]) == 1
@@ -96,7 +98,8 @@ def main():
         run = 0
         runs = []
         events = []
-        probs = df["prob_fire"].to_numpy(dtype=float)
+        prob_col = risk_meta.get("probability_column_used", "prob_fire")
+        probs = df[prob_col].to_numpy(dtype=float)
         for p in probs:
             if p >= FIRE_EVENT_THR:
                 run += 1
@@ -108,7 +111,7 @@ def main():
         df["fire_run_len"] = runs
         df["fire_event"] = events
 
-    meta = {"risk_weights_used": w_new, "temperature_from_ckpt": T}
+    meta = {"risk_weights_used": w_new, "temperature_from_ckpt": T, **risk_meta}
     df.to_csv(args.out, index=False)
     with open(Path(args.out).with_suffix(".risk_meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)

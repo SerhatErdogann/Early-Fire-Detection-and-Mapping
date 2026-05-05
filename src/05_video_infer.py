@@ -1,4 +1,11 @@
-# Video inference (RGB or RGB+thermal). Run from project root: python src/05_video_infer.py --rgb_video <path> [--th_video <path>]
+"""
+Final video inference entrypoint (auto fusion -> rgb -> thermal fallback).
+
+Examples:
+  python src/05_video_infer.py --rgb_video path/to/rgb.mp4 --th_video path/to/th.mp4
+  python src/05_video_infer.py --rgb_video path/to/rgb.mp4
+  python src/05_video_infer.py --th_video path/to/th.mp4
+"""
 import argparse
 from pathlib import Path
 import sys
@@ -13,15 +20,15 @@ except ImportError:
     CKPT_RGB = Path("models/rgb.pt")
     CKPT_THERMAL = Path("models/thermal.pt")
     INFERENCE_DEFAULT = {
-        "smooth_window": 5,
-        "ema_alpha": 0.3,
+        "smooth_window": 7,
+        "ema_alpha": 0.30,
         "use_tta": False,
-        "step_frames": 5,
+        "step_frames": 12,
         "scene_thresh": 0.10,
         "scene_conf_scale": 0.7,
-        "hyst_high": 0.7,
-        "hyst_low": 0.4,
-        "persist_n": 5,
+        "hyst_high": 0.60,
+        "hyst_low": 0.40,
+        "persist_n": 4,
         "min_component_area": 0.01,
         "growth_downscale": 0.85,
         "kl_hist_thresh": 0.35,
@@ -31,14 +38,19 @@ except ImportError:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rgb_video", required=True)
+    ap.add_argument("--rgb_video", default=None)
     ap.add_argument("--th_video", default=None)
-    ap.add_argument("--step", type=int, default=INFERENCE_DEFAULT.get("step_frames", 5))
+    ap.add_argument("--step", type=int, default=INFERENCE_DEFAULT.get("step_frames", 12))
     ap.add_argument("--smooth_win", type=int, default=INFERENCE_DEFAULT.get("smooth_window", 5))
     ap.add_argument("--ema_alpha", type=float, default=INFERENCE_DEFAULT.get("ema_alpha", 0.3))
-    ap.add_argument("--tta", action="store_true", help="Test-time augmentation (horizontal flip)")
+    ap.add_argument(
+        "--tta",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable/disable test-time augmentation (horizontal flip)",
+    )
     ap.add_argument("--override_thr", type=float, default=None)
-    ap.add_argument("--size", type=int, default=384)
+    ap.add_argument("--size", type=int, default=224)
     ap.add_argument("--model_fusion", default=str(CKPT_FUSION))
     ap.add_argument("--model_rgb", default=str(CKPT_RGB))
     ap.add_argument("--model_thermal", default=str(CKPT_THERMAL))
@@ -65,9 +77,9 @@ def main():
     )
     ap.add_argument("--scene-thresh", type=float, default=idf.get("scene_thresh", 0.10))
     ap.add_argument("--scene-confidence-scale", type=float, default=idf.get("scene_conf_scale", 0.7))
-    ap.add_argument("--hyst-high", type=float, default=idf.get("hyst_high", 0.7))
-    ap.add_argument("--hyst-low", type=float, default=idf.get("hyst_low", 0.4))
-    ap.add_argument("--persist-n", type=int, default=idf.get("persist_n", 5))
+    ap.add_argument("--hyst-high", type=float, default=idf.get("hyst_high", 0.55))
+    ap.add_argument("--hyst-low", type=float, default=idf.get("hyst_low", 0.35))
+    ap.add_argument("--persist-n", type=int, default=idf.get("persist_n", 2))
     ap.add_argument("--min-area", type=float, default=idf.get("min_component_area", 0.01))
     ap.add_argument("--growth-downscale", type=float, default=idf.get("growth_downscale", 0.85))
     ap.add_argument("--kl-scene", action="store_true", help="Also trigger scene reset on RGB histogram KL jump")
@@ -84,21 +96,30 @@ def main():
     ap.add_argument("--modal-agreement", action="store_true", default=idf.get("enable_modal_agreement", False))
     ap.add_argument("--modal-min-corr", type=float, default=idf.get("modal_agreement_min_corr", 0.2))
     ap.add_argument("--modal-penalty", type=float, default=idf.get("modal_agreement_penalty", 0.6))
+    # adaptive-step can be enabled/disabled explicitly
+    ap.add_argument(
+        "--adaptive-step",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable/disable adaptive frame step based on motion/risk",
+    )
+    ap.add_argument("--adaptive-min-step", type=int, default=idf.get("adaptive_min_step", 1))
+    ap.add_argument("--adaptive-max-step", type=int, default=idf.get("adaptive_max_step", 12))
+    ap.add_argument("--adaptive-low-motion", type=float, default=idf.get("adaptive_low_motion", 0.03))
+    ap.add_argument("--adaptive-high-risk", type=float, default=idf.get("adaptive_high_risk", 0.65))
+    ap.add_argument("--benchmark", action="store_true", help="Write performance benchmark JSON")
+    ap.add_argument("--benchmark-out", default=None, help="Benchmark JSON output path")
     args = ap.parse_args()
 
-    if args.mode == "auto":
-        ckpt = args.model_fusion if args.th_video else args.model_rgb
-    elif args.mode == "fusion":
-        ckpt = args.model_fusion
-    elif args.mode == "thermal":
-        ckpt = args.model_thermal
-    else:
-        ckpt = args.model_rgb
+    if not args.rgb_video and not args.th_video:
+        raise SystemExit("Provide at least one of: --rgb_video, --th_video")
 
     out_csv = run_video_inference(
-        args.rgb_video,
+        rgb_video_path=args.rgb_video,
         th_video_path=args.th_video,
-        ckpt_path=ckpt,
+        ckpt_fusion=args.model_fusion,
+        ckpt_rgb=args.model_rgb,
+        ckpt_thermal=args.model_thermal,
         mode=args.mode,
         size=args.size,
         step_frames=args.step,
@@ -135,6 +156,13 @@ def main():
         enable_modal_agreement=args.modal_agreement,
         modal_agreement_min_corr=args.modal_min_corr,
         modal_agreement_penalty=args.modal_penalty,
+        adaptive_step=args.adaptive_step,
+        adaptive_min_step=args.adaptive_min_step,
+        adaptive_max_step=args.adaptive_max_step,
+        adaptive_low_motion=args.adaptive_low_motion,
+        adaptive_high_risk=args.adaptive_high_risk,
+        benchmark=args.benchmark,
+        benchmark_out=args.benchmark_out,
     )
     print("Output written:", out_csv)
 

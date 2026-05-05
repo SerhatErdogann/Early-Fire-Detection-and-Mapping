@@ -1,5 +1,14 @@
+"""Checkpoint loader shared by inference scripts.
+
+Restores the underlying classifier (``DualBranchFusion`` for dual-branch fusion
+runs, otherwise the single-trunk model produced by :func:`make_model`) plus the
+inference metadata stored alongside the weights (default decision threshold,
+temperature, mode tag).
+"""
+from typing import Tuple
+
 import torch
-from pathlib import Path
+from torch import nn
 
 try:
     from src.models.backbones import make_model
@@ -9,9 +18,12 @@ except ImportError:
     from ..models.cls.dual_branch_fusion import DualBranchFusion
 
 
-def load_checkpoint(ckpt_path):
+def load_checkpoint(ckpt_path) -> Tuple[nn.Module, str, str, float, float]:
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    ckpt = torch.load(ckpt_path, map_location=device)
+    try:
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+    except TypeError:
+        ckpt = torch.load(ckpt_path, map_location=device)
     in_ch = int(ckpt["in_ch"])
     backbone = ckpt.get("backbone", "resnet18")
     model_family = ckpt.get("model_family") or ckpt.get("arch")

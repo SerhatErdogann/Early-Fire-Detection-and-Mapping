@@ -1,0 +1,42 @@
+# Tooling-only configuration. There is no build backend or installable package
+# defined here on purpose — `pip install` is driven from `requirements.txt` and
+# scripts are run directly via `python src/...`.
+
+[tool.ruff]
+# Project lines historically wrap closer to 110-120 columns. We pick 120 to
+# match existing style without forcing a behaviour-changing reflow.
+line-length = 120
+target-version = "py311"
+extend-exclude = [
+    "data",
+    "outputs",
+    "models",
+    ".venv",
+    "__pycache__",
+]
+
+[tool.ruff.lint]
+# Conservative set of rules: pyflakes (F) catches real bugs, pycodestyle (E/W)
+# enforces light formatting, SIM/B catch idiomatic mistakes that are safe to
+# rewrite mechanically.
+select = ["F", "E", "W", "SIM", "B"]
+# Keep the explicit `bool(...)` casts and similar idioms used throughout the
+# inference pipeline; aggressive auto-fix here would change behaviour.
+ignore = [
+    "E501",  # line length is enforced by `line-length` above
+    "B008",  # function-call default args are intentional in CLI definitions
+    "SIM108", # if/else -> ternary; some loops read clearer as explicit blocks
+    "SIM115", # context manager for file ops; many CLI scripts open then exit
+    "SIM117", # nested with-statements are intentional in inference pipelines
+    "B904",  # raise-from in pure utility code adds noise
+    "E741",  # ambiguous single-letter loop vars (e.g. `l`) appear in math code
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Numbered entry-point scripts use top-level imports after sys.path tweaks.
+"src/0*.py" = ["E402"]
+"src/02_train.py" = ["E402"]
+"src/training/__init__.py" = ["F401"]
+"src/inference/__init__.py" = ["F401"]
+"src/data/__init__.py" = ["F401"]
+"src/risk/__init__.py" = ["F401"]

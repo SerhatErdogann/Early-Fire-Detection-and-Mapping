@@ -25,14 +25,20 @@ pip install -r requirements.txt
 ## 2. Index oluştur (veri listesi)
 
 ```powershell
-python src/01_build_index.py
+python src/01_build_master_index.py
 ```
 
-Çıktı: `outputs/flame_index.csv`
+Çıktı:
+- `outputs/flame_index.csv` (legacy)
+- `data/master_index.parquet` (önerilen)
 
 ---
 
 ## 3. Eğitim
+
+Not:
+- “Sıfırdan” çalıştırmak istiyorsanız, bu adım sonunda `models/*.pt` oluşur ve UI’dan video inference çalıştırabilirsiniz.
+- `--epochs 1` sadece smoke test içindir; **gerçeğe yakın metrikler için 20+ epoch** önerilir.
 
 **Hepsini eğit (rgb + thermal + fusion):**
 ```powershell
@@ -86,22 +92,128 @@ python src/06_add_risk_score.py
 
 ---
 
-## 6. Görsel demo (Gradio)
+## 6. Web arayüzü (Streamlit)
 
-Tarayıcıda RGB + termal görsel yükleyip test etmek için:
+Tarayıcıda video çıktısını (risk/event) incelemek ve model metriklerini (eğitim/test) görmek için:
 
 ```powershell
-python src/03_app.py
+streamlit run src/07_ui.py
 ```
 
-Tarayıcıda açılan adresi (örn. http://127.0.0.1:7860) kullanın.
+Tarayıcıda açılan adresi (terminalde yazar) kullanın.
+
+Streamlit içindeki akış:
+- **Hızlı Test**: video yükle → inference + risk + event üret → timeline + frame panel
+- **Model Metrikleri**: `outputs/metrics_*.json` gösterir
+- **İnceleme (CSV ile)**: daha önce üretilmiş `outputs/video_predictions_scored.csv` dosyasını açar
 
 ---
 
 ## Özet sıra
 
-1. `python src/01_build_index.py`
+1. `python src/01_build_master_index.py`
 2. `python src/02_train.py --mode all --epochs 20`
+3. `streamlit run src/07_ui.py` (UI’dan video yükleyip “Hızlı Test” ile çalıştır)
+
+Alternatif (CLI ile):
 3. `python src/05_video_infer.py --rgb_video video.mp4`
 4. `python src/06_add_risk_score.py`
-5. (İsteğe bağlı) `python src/03_app.py`
+5. `streamlit run src/07_ui.py`
+
+---
+
+## Performans için önerilen presetler
+
+### A) Hız öncelikli (saha tarama)
+
+```powershell
+python src/05_video_infer.py --rgb_video "video.mp4" --step 8 --size 224 --fp16
+```
+
+Notlar:
+- `--fp16` GPU varsa hızlandırır.
+- CAM üretimi yoksa en hızlı çalışır.
+- `--size 224` daha hızlı, doğruluk biraz düşebilir.
+
+### B) Denge (önerilen günlük kullanım)
+
+```powershell
+python src/05_video_infer.py --rgb_video "video.mp4" --step 5 --adaptive-step --smooth_win 7 --ema_alpha 0.3 --tta --fp16
+```
+
+### C) Doğruluk/stabilite öncelikli
+
+```powershell
+python src/05_video_infer.py --rgb_video "video.mp4" --step 3 --adaptive-step --size 384 --smooth_win 9 --ema_alpha 0.35 --tta
+```
+
+### Fusion (RGB + termal)
+
+```powershell
+python src/05_video_infer.py --rgb_video "rgb.mp4" --th_video "termal.mp4" --mode fusion --smooth_win 7 --ema_alpha 0.3 --tta --fp16
+```
+
+---
+
+## Tek seferde hızlı başlangıç
+
+```powershell
+cd C:\Users\Vıctus\Desktop\bitirme\flame_fire_project
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+python src/01_build_master_index.py
+python src/02_train.py --mode all --epochs 20
+python src/05_video_infer.py --rgb_video "video.mp4" --step 5 --smooth_win 7 --ema_alpha 0.3 --tta --fp16
+python src/06_add_risk_score.py
+streamlit run src/07_ui.py
+```
+
+---
+
+## Ablasyonlar
+
+Standart karşılaştırma eğitimleri için:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\ablations.ps1 -Ablation all -Epochs 20
+```
+
+Tek ablation çalıştırmak için:
+
+```powershell
+# RGB baseline
+powershell -ExecutionPolicy Bypass -File scripts\ablations.ps1 -Ablation rgb
+
+# Thermal baseline
+powershell -ExecutionPolicy Bypass -File scripts\ablations.ps1 -Ablation thermal
+
+# Early fusion (tek 4 kanallı encoder)
+powershell -ExecutionPolicy Bypass -File scripts\ablations.ps1 -Ablation early_fusion
+
+# Dual-branch fusion (varsayılan fusion yolu)
+powershell -ExecutionPolicy Bypass -File scripts\ablations.ps1 -Ablation dual_branch
+
+# Hard negative retrain (dual_branch_fusion -> val FP'lerini yeniden beslet)
+powershell -ExecutionPolicy Bypass -File scripts\ablations.ps1 -Ablation hard_neg_retrain
+```
+
+Not: `--mode fusion` artık varsayılan olarak `dual_branch_fusion` model ailesini kullanır
+(`rgb` ve `thermal` için ayrı backbone, son feature'lar concat edilip classifier'a gidiyor).
+Eski davranışı istiyorsanız `--model_family early_fusion` ile açıkça belirtin.
+
+## Benchmark ve Test
+
+Benchmark JSON üretmek için:
+
+```powershell
+python src/05_video_infer.py --rgb_video "video.mp4" --step 5 --adaptive-step --fp16 --benchmark
+```
+
+Çıktı: `outputs/video_predictions.benchmark.json`
+
+Hızlı test çalıştırma:
+
+```powershell
+pytest -q
+```

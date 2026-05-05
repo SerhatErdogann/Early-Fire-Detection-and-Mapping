@@ -9,11 +9,11 @@ Pillow>=9.0.0
 scikit-learn>=1.0.0
 tqdm>=4.60.0
 
-# Optional: Gradio app (03_app.py)
-gradio>=4.0.0
+# Web UI
+streamlit>=1.30.0
 
-# Optional: CAM heatmaps (05_video_infer, 03_app, 04_export_intensity)
+# Optional: CAM heatmaps (video inference + intensity export)
 torchcam>=0.2.0
 
-# Optional: Keras video inference (05_video_infer_h5)
-# tensorflow>=2.10.0
+# Testing
+pytest>=7.0.0

@@ -6,15 +6,18 @@ from sklearn.metrics import (
     confusion_matrix,
     precision_recall_fscore_support,
     average_precision_score,
+    balanced_accuracy_score,
 )
 
 
-def eval_probs(model, loader, device, temperature=1.0):
+def eval_probs(model, loader, device, temperature=1.0, corrupt_batch=None):
     model.eval()
     ys, ps = [], []
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device)
+            if corrupt_batch is not None:
+                x = corrupt_batch(x)
             logits = model(x)
             logits_t = logits / max(1e-6, float(temperature))
             prob = torch.softmax(logits_t, dim=1)[:, 1].cpu().numpy()
@@ -53,19 +56,31 @@ def fit_temperature(ys: np.ndarray, logits: np.ndarray, T_grid=None):
 def metrics_at_threshold(ys: np.ndarray, ps: np.ndarray, thr: float):
     pred = (ps >= thr).astype(np.int64)
     acc = accuracy_score(ys, pred)
+    bal_acc = balanced_accuracy_score(ys, pred) if len(ys) else float("nan")
     auc = roc_auc_score(ys, ps) if len(set(ys.tolist())) == 2 else float("nan")
     ap = average_precision_score(ys, ps) if len(set(ys.tolist())) == 2 else float("nan")
     cm = confusion_matrix(ys, pred, labels=[0, 1])
+    # cm layout is [[TN, FP], [FN, TP]] — only the negative-class cells are used
+    # below, but we keep the full matrix in the returned dict for callers.
+    tn = float(cm[0, 0]) if cm.size else 0.0
+    fp = float(cm[0, 1]) if cm.size else 0.0
+    specificity = tn / max(1.0, (tn + fp))
+    fpr = fp / max(1.0, (fp + tn))
     prec, rec, f1, _ = precision_recall_fscore_support(
         ys, pred, average="binary", zero_division=0
     )
     return {
         "acc": acc,
+        "bal_acc": bal_acc,
         "auc": auc,
         "ap": ap,
         "cm": cm,
         "precision": prec,
         "recall": rec,
+        # negative-class metrics (no_fire)
+        "specificity": float(specificity),
+        "no_fire_recall": float(specificity),
+        "false_positive_rate": float(fpr),
         "f1": f1,
     }
 
@@ -110,6 +125,31 @@ def brier_score_binary(ys: np.ndarray, ps: np.ndarray) -> float:
     ys = np.asarray(ys, dtype=np.float64)
     ps = np.asarray(ps, dtype=np.float64)
     return float(np.mean((ps - ys) ** 2))
+
+
+def reliability_report(ys: np.ndarray, ps: np.ndarray, n_bins: int = 10):
+    ys = np.asarray(ys, dtype=np.int64)
+    ps = np.asarray(ps, dtype=np.float64)
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    out = []
+    for i in range(n_bins):
+        lo, hi = bins[i], bins[i + 1]
+        m = (ps >= lo) & (ps < hi) if i < n_bins - 1 else (ps >= lo) & (ps <= hi)
+        cnt = int(m.sum())
+        if cnt == 0:
+            out.append({"bin": i, "lo": float(lo), "hi": float(hi), "count": 0, "acc": None, "conf": None})
+            continue
+        out.append(
+            {
+                "bin": i,
+                "lo": float(lo),
+                "hi": float(hi),
+                "count": cnt,
+                "acc": float(ys[m].mean()),
+                "conf": float(ps[m].mean()),
+            }
+        )
+    return out
 
 
 def _best_threshold_mode(ys: np.ndarray, ps: np.ndarray, mode: str) -> float:

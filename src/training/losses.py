@@ -41,11 +41,27 @@ class LabelSmoothingCE(nn.Module):
 class ClassBalancedFocalCE(nn.Module):
     """Focal loss with optional per-class effective number weights (CB loss style)."""
 
-    def __init__(self, counts_per_class: torch.Tensor, beta: float = 0.9999, gamma: float = 2.0):
+    def __init__(
+        self,
+        counts_per_class: torch.Tensor,
+        beta: float = 0.9999,
+        gamma: float = 2.0,
+        *,
+        manual_class_gain: tuple[float, float] | None = None,
+        device_hint: torch.device | None = None,
+    ):
         super().__init__()
-        eff_num = 1.0 - torch.pow(beta, counts_per_class)
+        device = counts_per_class.device if isinstance(counts_per_class, torch.Tensor) else (
+            device_hint or torch.device("cpu")
+        )
+        eff_num = 1.0 - torch.pow(beta, counts_per_class.to(device))
         w = (1.0 - beta) / (eff_num + 1e-12)
         w = w / w.sum() * len(counts_per_class)
+        if manual_class_gain is not None:
+            g0, g1 = float(manual_class_gain[0]), float(manual_class_gain[1])
+            if g0 > 0 and g1 > 0:
+                sc = torch.tensor([g0, g1], dtype=torch.float32, device=device)
+                w = (w.float() * sc) / ((w.float() * sc).sum() + 1e-12) * float(len(counts_per_class))
         self.register_buffer("weight", w.float())
         self.gamma = float(gamma)
 
@@ -63,6 +79,7 @@ def build_loss(
     focal_gamma: float = 2.0,
     label_smoothing: float = 0.0,
     class_counts: torch.Tensor | None = None,
+    manual_class_gain: tuple[float, float] | None = None,
 ):
     name = (loss_name or "focal").lower()
     w = class_weights
@@ -73,5 +90,10 @@ def build_loss(
     if name in ("class_balanced_focal", "cb_focal"):
         if class_counts is None:
             class_counts = torch.tensor([1.0, 1.0], device=device)
-        return ClassBalancedFocalCE(class_counts.to(device), gamma=focal_gamma)
+        return ClassBalancedFocalCE(
+            class_counts.to(device),
+            gamma=focal_gamma,
+            manual_class_gain=manual_class_gain,
+            device_hint=device,
+        )
     return FocalLossCE(weight=w, gamma=focal_gamma)
