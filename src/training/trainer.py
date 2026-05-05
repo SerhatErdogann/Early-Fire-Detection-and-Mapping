@@ -1109,7 +1109,8 @@ def train_one_run(
         score_realistic = realistic_selection_score(vm)
         selection_score = score_realistic if sel_norm == "realistic" else score_legacy
 
-        # checkpoint selection metric (legacy f1+balacc half-half vs realistic=F1+BAcc-0.5*FPR on val @ best_thr)
+        # checkpoint selection metric: legacy = 0.5*F1 + 0.5*BalAcc;
+        # realistic = F1 + BalAcc + AP - 0.5*FPR (val @ best_thr)
         if selection_score == selection_score and selection_score > best_val_ap:
             best_val_ap = float(selection_score)
             patience_counter = 0

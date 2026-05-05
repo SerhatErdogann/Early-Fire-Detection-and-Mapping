@@ -260,8 +260,26 @@ def select_threshold_policies(grid: pd.DataFrame) -> dict[str, dict[str, Any]]:
 
 
 def realistic_selection_score(vm: dict) -> float:
-    """val: f1 + bal_acc - 0.5 * fpr (composite for epoch selection)."""
-    return float(vm["f1"]) + float(vm["bal_acc"]) - 0.5 * float(vm["false_positive_rate"])
+    """val: f1 + bal_acc + ap - 0.5 * fpr (composite for epoch selection).
+
+    AP captures ranking quality (threshold-independent); F1 + bal_acc cover the
+    operating point at the chosen threshold; -0.5 * FPR penalises false alarms.
+    The AP term was added because val F1/bal_acc alone can favour epochs that
+    overfit to val while later epochs (with stronger AP/test bal_acc) score
+    lower on the operating-point metrics.
+    """
+    def _safe(x: float) -> float:
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return 0.0
+        return 0.0 if v != v else v  # NaN guard
+
+    f1 = _safe(vm.get("f1", 0.0))
+    bal_acc = _safe(vm.get("bal_acc", 0.0))
+    ap = _safe(vm.get("ap", 0.0))
+    fpr = _safe(vm.get("false_positive_rate", 0.0))
+    return f1 + bal_acc + ap - 0.5 * fpr
 
 
 def sanitize_for_json(obj: Any) -> Any:
