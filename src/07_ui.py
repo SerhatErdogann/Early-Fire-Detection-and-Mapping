@@ -138,6 +138,78 @@ def _format_run_id() -> str:
     return time.strftime("%Y%m%d_%H%M%S")
 
 
+def _summarize_result(df_scored: pd.DataFrame, df_events: pd.DataFrame) -> dict[str, Any]:
+    """Compute the high-level summary used by the result card.
+
+    Returns a dict with: fire_detected (bool), max_prob, threshold, total_frames,
+    fire_frames, num_events, first_fire_sec (or None), first_fire_idx (or None),
+    max_risk_band (str), explanation (short Turkish sentence).
+    """
+    prob_col = "decision_prob" if "decision_prob" in df_scored.columns else "prob_fire"
+    probs = pd.to_numeric(df_scored.get(prob_col, 0.0), errors="coerce").fillna(0.0)
+    max_prob = float(probs.max()) if len(probs) else 0.0
+    thr = float(pd.to_numeric(df_scored.get("threshold_used", 0.5), errors="coerce").dropna().median()) if len(df_scored) else 0.5
+
+    pred_fire = pd.to_numeric(df_scored.get("pred_fire", 0), errors="coerce").fillna(0).astype(int)
+    fire_frames = int((pred_fire == 1).sum())
+    total_frames = int(len(df_scored))
+    num_events = int(len(df_events))
+    fire_detected = num_events > 0 or fire_frames > 0
+
+    first_fire_sec: float | None = None
+    first_fire_idx: int | None = None
+    if fire_frames > 0 and "timestamp_sec" in df_scored.columns and "frame_idx" in df_scored.columns:
+        df_fire = df_scored[pred_fire == 1].sort_values("frame_idx")
+        if not df_fire.empty:
+            row = df_fire.iloc[0]
+            try:
+                first_fire_sec = float(row.get("timestamp_sec", 0.0))
+                first_fire_idx = int(row.get("frame_idx", 0))
+            except (TypeError, ValueError):
+                first_fire_sec, first_fire_idx = None, None
+
+    bands = pd.Series(df_scored.get("confidence_band", []), dtype=str).str.lower()
+    if (bands == "high").any():
+        max_risk_band = "high"
+    elif (bands == "medium").any():
+        max_risk_band = "medium"
+    elif (bands == "low").any():
+        max_risk_band = "low"
+    else:
+        max_risk_band = "n/a"
+
+    if fire_detected:
+        if first_fire_sec is not None:
+            explanation = (
+                f"Model {fire_frames} karede yangın işareti verdi (eşik={thr:.2f}). "
+                f"İlk tespit: {first_fire_sec:.2f}s (frame {first_fire_idx}). "
+                f"Toplam {num_events} olay aralığı bulundu."
+            )
+        else:
+            explanation = (
+                f"Model {fire_frames} karede yangın işareti verdi (eşik={thr:.2f}, "
+                f"{num_events} olay)."
+            )
+    else:
+        explanation = (
+            f"Model bu videoda yangın bulamadı. Maksimum güven %{max_prob*100:.1f} "
+            f"(eşik={thr:.2f})."
+        )
+
+    return {
+        "fire_detected": fire_detected,
+        "max_prob": max_prob,
+        "threshold": thr,
+        "total_frames": total_frames,
+        "fire_frames": fire_frames,
+        "num_events": num_events,
+        "first_fire_sec": first_fire_sec,
+        "first_fire_idx": first_fire_idx,
+        "max_risk_band": max_risk_band,
+        "explanation": explanation,
+    }
+
+
 def _save_upload(upload) -> str:
     suffix = Path(upload.name).suffix or ".mp4"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
@@ -251,16 +323,7 @@ with tab_infer:
         th_path = _save_upload(up_th) if up_th is not None else None
         out_dir = Path(out_base) / _format_run_id()
 
-        # Quick diagnostics for uploaded temp videos
-        st.caption("Video diagnostics (uploaded temp files)")
-        st.json(
-            {
-                "rgb": {"path": rgb_path, **_video_info(rgb_path)},
-                "thermal": ({"path": th_path, **_video_info(th_path)} if th_path else None),
-            }
-        )
-
-        with st.status("Çalışıyor…", expanded=True) as status:
+        with st.status("Çalışıyor…", expanded=False) as status:
             t0 = time.perf_counter()
             try:
                 result = _run_inference(rgb_path, th_path, preset, ckpt_choice, out_dir)
@@ -274,63 +337,90 @@ with tab_infer:
         if result is not None:
             df_scored = result["df_scored"]
             df_events = result["df_events"]
+            summary = _summarize_result(df_scored, df_events)
 
-            st.subheader("Özet")
+            st.markdown("### Sonuç")
+            if summary["fire_detected"]:
+                st.error(
+                    f"**🔥 YANGIN TESPİT EDİLDİ**  \n"
+                    f"{summary['explanation']}"
+                )
+            else:
+                st.success(
+                    f"**✓ Yangın tespit edilmedi**  \n"
+                    f"{summary['explanation']}"
+                )
+
             m1, m2, m3, m4 = st.columns(4)
-            prob_col = "decision_prob" if "decision_prob" in df_scored.columns else "prob_fire"
-            m1.metric("Max prob", f"{float(df_scored[prob_col].max()):.3f}")
-            m2.metric("Max risk(norm)", f"{float(pd.to_numeric(df_scored.get('risk_score_norm', 0.0), errors='coerce').max() or 0.0):.3f}")
-            m3.metric("Confirmed frames", f"{int((df_scored.get('alarm_state','').astype(str)=='confirmed').sum()) if 'alarm_state' in df_scored.columns else 0}")
-            m4.metric("Events", f"{len(df_events)}")
+            m1.metric("Maksimum güven", f"{summary['max_prob']*100:.1f}%")
+            m2.metric("Yangın frame'i", f"{summary['fire_frames']} / {summary['total_frames']}")
+            m3.metric("Olay sayısı", f"{summary['num_events']}")
+            risk_label = {"high": "Yüksek", "medium": "Orta", "low": "Düşük"}.get(summary["max_risk_band"], "—")
+            m4.metric("Risk seviyesi", risk_label)
 
-            if "frame_idx" in df_scored.columns:
-                plot_df = df_scored.sort_values("frame_idx").copy()
-                plot_df["prob"] = pd.to_numeric(plot_df.get(prob_col, 0.0), errors="coerce").fillna(0.0)
-                plot_df["risk"] = pd.to_numeric(plot_df.get("risk_score_norm", 0.0), errors="coerce").fillna(0.0)
-                st.subheader("Timeline")
-                st.line_chart(plot_df.set_index("frame_idx")[["prob", "risk"]], height=220)
+            with st.expander("📊 Detaylı analiz (timeline, frame paneli, dosyalar)", expanded=False):
+                prob_col = "decision_prob" if "decision_prob" in df_scored.columns else "prob_fire"
 
-            st.subheader("🔥 Fire dediği frameler")
-            if "pred_fire" in df_scored.columns and "frame_idx" in df_scored.columns:
-                df_fire = df_scored[df_scored["pred_fire"].astype(int) == 1].copy()
-                if df_fire.empty:
-                    st.info("Bu videoda `pred_fire=1` olan frame yok.")
-                else:
-                    df_fire = df_fire.sort_values(prob_col, ascending=False)
-                    show_n = st.slider("Gösterilecek fire frame sayısı", 5, 200, 30, 5)
-                    cols = [c for c in ["frame_idx", prob_col, "threshold_used", "alarm_state", "scene_changed"] if c in df_fire.columns]
-                    st.dataframe(df_fire[cols].head(int(show_n)), use_container_width=True)
-                    top_frames = df_fire["frame_idx"].astype(int).head(int(show_n)).tolist()
-                    pick = st.selectbox("Göster (frame_idx)", options=top_frames, index=0, key="pick_fire_frame")
-                    fr2 = _read_frame_rgb(rgb_path, int(pick))
-                    if fr2 is not None:
-                        st.image(fr2, use_container_width=True)
-                    rr = _nearest_row_by_frame(df_scored, int(pick))
-                    st.json(rr.to_dict()) if rr is not None else None
-            else:
-                st.info("CSV içinde `pred_fire` veya `frame_idx` yok.")
+                if "frame_idx" in df_scored.columns:
+                    plot_df = df_scored.sort_values("frame_idx").copy()
+                    plot_df["prob"] = pd.to_numeric(plot_df.get(prob_col, 0.0), errors="coerce").fillna(0.0)
+                    plot_df["risk"] = pd.to_numeric(plot_df.get("risk_score_norm", 0.0), errors="coerce").fillna(0.0)
+                    st.markdown("**Timeline (yangın olasılığı + risk skoru)**")
+                    st.line_chart(plot_df.set_index("frame_idx")[["prob", "risk"]], height=220)
 
-            st.subheader("Event listesi")
-            if df_events.empty:
-                st.info("Event yok.")
-            else:
-                st.dataframe(df_events, use_container_width=True)
+                if "pred_fire" in df_scored.columns and "frame_idx" in df_scored.columns:
+                    st.markdown("**🔥 Yangın tespit edilen frame'ler**")
+                    df_fire = df_scored[df_scored["pred_fire"].astype(int) == 1].copy()
+                    if df_fire.empty:
+                        st.info("Yangın frame'i yok.")
+                    else:
+                        df_fire = df_fire.sort_values(prob_col, ascending=False)
+                        show_n = st.slider("Listede kaç frame gösterilsin", 5, 200, 30, 5)
+                        cols = [c for c in ["frame_idx", "timestamp_sec", prob_col, "threshold_used", "alarm_state"] if c in df_fire.columns]
+                        st.dataframe(df_fire[cols].head(int(show_n)), use_container_width=True)
+                        top_frames = df_fire["frame_idx"].astype(int).head(int(show_n)).tolist()
+                        pick = st.selectbox("Frame'i görüntüle", options=top_frames, index=0, key="pick_fire_frame")
+                        fr2 = _read_frame_rgb(rgb_path, int(pick))
+                        if fr2 is not None:
+                            st.image(fr2, use_container_width=True)
 
-            st.subheader("Frame panel")
-            info = _video_info(rgb_path)
-            max_frame = int(info.get("frame_count") or 0) - 1
-            max_frame = max(0, max_frame)
-            frame_sel = st.slider("Frame", 0, max_frame, 0, 1)
-            a, b = st.columns([1, 1])
-            with a:
-                fr = _read_frame_rgb(rgb_path, frame_sel)
-                st.image(fr, use_container_width=True) if fr is not None else st.warning("Frame okunamadı.")
-            with b:
-                r = _nearest_row_by_frame(df_scored, frame_sel)
-                st.json(r.to_dict()) if r is not None else st.info("Satır bulunamadı.")
+                if not df_events.empty:
+                    st.markdown("**Olay (event) listesi**")
+                    st.dataframe(df_events, use_container_width=True)
 
-            with st.expander("Çıktı dosyaları"):
+                st.markdown("**Frame inceleme paneli**")
+                info = _video_info(rgb_path)
+                max_frame = max(0, int(info.get("frame_count") or 0) - 1)
+                frame_sel = st.slider("Frame", 0, max_frame, 0, 1)
+                col_img, col_meta = st.columns([1, 1])
+                with col_img:
+                    fr = _read_frame_rgb(rgb_path, frame_sel)
+                    st.image(fr, use_container_width=True) if fr is not None else st.warning("Frame okunamadı.")
+                with col_meta:
+                    r = _nearest_row_by_frame(df_scored, frame_sel)
+                    if r is not None:
+                        st.metric("Yangın olasılığı", f"{float(r.get(prob_col, 0.0))*100:.1f}%")
+                        st.metric("Tahmin", "🔥 Yangın" if int(r.get("pred_fire", 0)) == 1 else "✓ Yok")
+                        if "alarm_state" in r:
+                            st.caption(f"Alarm durumu: `{r.get('alarm_state', '—')}`")
+                    else:
+                        st.info("Satır bulunamadı.")
+
+                st.markdown("**Çıktı dosyaları**")
                 st.write({k: result[k] for k in ["pred_csv", "scored_csv", "events_csv", "benchmark_json"]})
+
+            with st.expander("🛠️ Geliştirici / Debug bilgileri", expanded=False):
+                st.caption("Yüklenen geçici videolar ve ham çıktı satırı.")
+                st.json(
+                    {
+                        "rgb": {"path": rgb_path, **_video_info(rgb_path)},
+                        "thermal": ({"path": th_path, **_video_info(th_path)} if th_path else None),
+                        "preset": preset.key,
+                        "checkpoint": ckpt_choice,
+                    }
+                )
+                if st.checkbox("Ham CSV satırlarını göster (ilk 50)", value=False, key="dbg_raw_rows"):
+                    st.dataframe(df_scored.head(50), use_container_width=True)
 
 
 with tab_review:
