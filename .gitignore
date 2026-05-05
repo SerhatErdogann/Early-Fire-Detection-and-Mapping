@@ -4,13 +4,13 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# Data / artifacts (large)
-data/
-data.rar
-outputs/
+# Data / artifacts (large) — root only, NOT src/data/ (Python modules)
+/data/
+/data.rar
+/outputs/
 
-# Models (can be large)
-models/
+# Models (can be large) — root models/ folder
+/models/
 *.pt
 *.h5
 
