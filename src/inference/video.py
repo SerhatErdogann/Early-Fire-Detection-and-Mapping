@@ -15,6 +15,7 @@ from .model_loader import load_checkpoint
 from .postprocess import stats_from_soft_map
 from .preprocess import prep_rgb, prep_thermal
 from .alarm import AlarmConfig, AlarmStateMachine
+from .capture_utils import open_video_capture
 from .frame_sampling import AdaptiveFrameSampler
 
 try:
@@ -115,10 +116,20 @@ def run_video_inference(
     adaptive_high_risk: float = 0.65,
     benchmark: bool = False,
     benchmark_out: str | None = None,
+    prob_temporal_blend: float = 0.0,
+    burst_min_frames: int = 3,
+    burst_threshold_frac: float = 1.0,
+    auto_step_long_video: bool = False,
+    long_video_seconds: float = 600.0,
+    long_video_step_scale: float = 2.0,
+    max_step_cap: int = 64,
+    stream_buffer_reduce: bool = True,
+    infer_batch_size: int = 1,
 ):
     """
     Run fire classification on video (RGB only or RGB+thermal).
-    Uses moving average or EMA for probability smoothing (more stable on drone videos).
+    Uses optional moving-average + EMA blend for probability smoothing, plus a
+    consecutive-frame rule independent of hysteresis alarms.
     """
     out_csv = Path(out_csv or OUTPUTS_DIR / "video_predictions.csv")
     out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -132,17 +143,27 @@ def run_video_inference(
         polygon_dir = Path(polygon_dir or OUTPUTS_DIR / "polygons")
         polygon_dir.mkdir(parents=True, exist_ok=True)
 
+    if int(infer_batch_size) != 1:
+        print(
+            f"[video] infer_batch_size={infer_batch_size} not supported "
+            "(temporal_guard/CAM/TTA need per-frame); using 1."
+        )
+    burst_min_frames_eff = max(1, int(burst_min_frames))
+    burst_threshold_frac_eff = float(np.clip(float(burst_threshold_frac), 0.05, 1.5))
+
     cap_rgb = None
     if rgb_video_path:
-        cap_rgb = cv2.VideoCapture(str(rgb_video_path))
-        if not cap_rgb.isOpened():
-            raise SystemExit(f"Cannot open RGB video: {rgb_video_path}")
+        try:
+            cap_rgb = open_video_capture(str(rgb_video_path).strip(), buffer_reduce=bool(stream_buffer_reduce))
+        except Exception as exc:
+            raise SystemExit(f"Cannot open RGB video/source: {rgb_video_path} ({exc})")
 
     cap_th = None
     if th_video_path:
-        cap_th = cv2.VideoCapture(str(th_video_path))
-        if not cap_th.isOpened():
-            raise SystemExit(f"Cannot open thermal video: {th_video_path}")
+        try:
+            cap_th = open_video_capture(str(th_video_path).strip(), buffer_reduce=bool(stream_buffer_reduce))
+        except Exception as exc:
+            raise SystemExit(f"Cannot open thermal video/source: {th_video_path} ({exc})")
 
     if cap_rgb is None and cap_th is None:
         raise SystemExit("No input video provided. Provide rgb_video_path and/or th_video_path.")
@@ -237,6 +258,19 @@ def run_video_inference(
     track_id = 0
     win = max(1, int(smooth_window))
     step = max(1, int(step_frames))
+    duration_est_s = float(total) / float(fps) if total > 0 else 0.0
+    step_pre_auto = step
+    if (
+        auto_step_long_video
+        and duration_est_s >= float(long_video_seconds)
+        and step_pre_auto < int(max_step_cap)
+    ):
+        scaled = max(step_pre_auto, int(round(step_pre_auto * float(long_video_step_scale))))
+        step = min(int(max_step_cap), scaled)
+        print(
+            f"[video] long video (~{duration_est_s:.0f}s): step_frames {step_pre_auto} -> {step} "
+            f"(<= max_step_cap={max_step_cap})"
+        )
     alarm_machine = AlarmStateMachine(
         AlarmConfig(
             high_threshold=float(hyst_high_eff),
@@ -265,6 +299,7 @@ def run_video_inference(
     prev_gray = None
     hyst_fire = False
     persist_run = 0
+    burst_run = 0
     n_processed = 0
     modal_agreement = float("nan")
 
@@ -318,6 +353,7 @@ def run_video_inference(
             mask_ema = None
             prev_largest_area = 0.0
             persist_run = 0
+            burst_run = 0
             hyst_fire = False
             track_id = 0
 
@@ -455,7 +491,18 @@ def run_video_inference(
             if len(prob_buffer) > win:
                 prob_buffer = prob_buffer[-win:]
             ema_prob = _smooth_ema(prob_post, ema_prob, ema_alpha)
-        prob = ema_prob
+        prob_ma = float(np.mean(prob_buffer)) if prob_buffer else float(prob_post)
+        blend_w = float(np.clip(prob_temporal_blend, 0.0, 1.0))
+        prob_smooth = (1.0 - blend_w) * float(ema_prob) + blend_w * prob_ma
+        burst_thr = float(thr) * burst_threshold_frac_eff
+        if prob_ma >= burst_thr:
+            burst_run += 1
+        else:
+            burst_run = 0
+        pred_fire_burst = int(burst_run >= burst_min_frames_eff)
+        prob_fire_ema_val = float(ema_prob)
+        prob_fire_ma_val = float(prob_ma)
+        prob = float(prob_smooth)
 
         mean_intensity = 0.0
         top10 = 0.0
@@ -576,7 +623,11 @@ def run_video_inference(
             "frame_idx": idx,
             "timestamp_sec": float(idx) / float(fps),
             "prob_fire_raw": prob_model,
+            "prob_fire_ma": prob_fire_ma_val,
+            "prob_fire_ema": prob_fire_ema_val,
             "prob_fire": prob,
+            "burst_run_len": int(burst_run),
+            "pred_fire_burst_consec": pred_fire_burst,
             "decision_prob": decision_prob,
             "pred_fire": pred_fire,
             "mode_used": str(mode_used),
@@ -640,7 +691,8 @@ def run_video_inference(
                 break
 
     pbar.close()
-    cap_rgb.release()
+    if cap_rgb is not None:
+        cap_rgb.release()
     if cap_th is not None:
         cap_th.release()
 
@@ -669,7 +721,8 @@ def run_video_inference(
             + str(n_fire_event)
             + f" mode_counts={mode_counts} temporal_guard={bool(temporal_guard)} "
             + f"hyst_high={float(hyst_high_eff):.3f} hyst_low={float(hyst_low_eff):.3f} persist_n={int(persist_target)} "
-            + f"step={int(step_frames)} adaptive_step={bool(adaptive_step)}"
+            + f"step={int(step_frames)} inferred_step_now={step} adaptive_step={bool(adaptive_step)} "
+            + f"prob_temporal_blend={prob_temporal_blend}"
         )
     except Exception:
         pass
@@ -683,7 +736,11 @@ def run_video_inference(
                 "frame_idx",
                 "timestamp_sec",
                 "prob_fire_raw",
+                "prob_fire_ma",
+                "prob_fire_ema",
                 "prob_fire",
+                "burst_run_len",
+                "pred_fire_burst_consec",
                 "decision_prob",
                 "pred_fire",
                 "mode_used",

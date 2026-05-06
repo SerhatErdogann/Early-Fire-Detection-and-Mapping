@@ -109,6 +109,44 @@ def main():
     ap.add_argument("--adaptive-high-risk", type=float, default=idf.get("adaptive_high_risk", 0.65))
     ap.add_argument("--benchmark", action="store_true", help="Write performance benchmark JSON")
     ap.add_argument("--benchmark-out", default=None, help="Benchmark JSON output path")
+    ap.add_argument(
+        "--prob-temporal-blend",
+        type=float,
+        default=0.0,
+        help="Blend EMA with moving-average of last smooth_window probs (0=EMA-only, 1=MA-only).",
+    )
+    ap.add_argument(
+        "--burst-min-frames",
+        type=int,
+        default=3,
+        help="Consecutive frames with MA prob >= frac*thr to set pred_fire_burst_consec.",
+    )
+    ap.add_argument(
+        "--burst-threshold-frac",
+        type=float,
+        default=1.0,
+        help="Burst threshold multiplier vs saved operating threshold.",
+    )
+    ap.add_argument(
+        "--auto-step-long-video",
+        action="store_true",
+        help="If duration exceeds --long-video-seconds, grow step_frames (capped).",
+    )
+    ap.add_argument("--long-video-seconds", type=float, default=600.0)
+    ap.add_argument("--long-video-step-scale", type=float, default=2.0)
+    ap.add_argument("--max-step-cap", type=int, default=64)
+    ap.add_argument(
+        "--stream-buffer-reduce/--no-stream-buffer-reduce",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="For RTSP/http streams, hint OpenCV buffer size=1.",
+    )
+    ap.add_argument(
+        "--infer-batch-size",
+        type=int,
+        default=1,
+        help="Placeholder (only 1 supported; temporal/CAM-safe path).",
+    )
     args = ap.parse_args()
 
     if not args.rgb_video and not args.th_video:
@@ -163,6 +201,15 @@ def main():
         adaptive_high_risk=args.adaptive_high_risk,
         benchmark=args.benchmark,
         benchmark_out=args.benchmark_out,
+        prob_temporal_blend=float(args.prob_temporal_blend),
+        burst_min_frames=int(args.burst_min_frames),
+        burst_threshold_frac=float(args.burst_threshold_frac),
+        auto_step_long_video=bool(args.auto_step_long_video),
+        long_video_seconds=float(args.long_video_seconds),
+        long_video_step_scale=float(args.long_video_step_scale),
+        max_step_cap=int(args.max_step_cap),
+        stream_buffer_reduce=bool(args.stream_buffer_reduce),
+        infer_batch_size=int(args.infer_batch_size),
     )
     print("Output written:", out_csv)
 
