@@ -46,9 +46,15 @@ Detaylı kullanım, preset'ler ve ablation komutları için: [`NASIL_CALISTIRILI
 ## Eğitim akışında nelere dikkat ediliyor
 
 - **Sınıf dengesizliği:** `--loss_mode balanced_sampler` ile her batch yarı yarıya yangın/no-fire içerir; `WeightedRandomSampler` + source-aware ağırlıklar (`flame_video_nofire` arttırıldı, `cart_aux` azaltıldı) `cb_focal` kaybı ile birleştirilir.
-- **Bölme & sızıntı:** Sahne/grup tabanlı bölme (`split_group`); ekstra (drone) no-fire için ayrı holdout. `scripts/check_leakage.py` her index güncellemesinden sonra çalıştırılmalıdır.
+- **Bölme & sızıntı:** Sahne/grup tabanlı bölme (`split_group`); aynı video/sahne train ve val/test arasında bölünmez. `flame_video_nofire` (drone no-fire klipleri) **adaptif pair-bazlı** dağıtılır:
+  - 1 pair varsa hepsi `train`'e (modelin bu domain'i görmesi için),
+  - 2 pair varsa büyüğü `train`, küçüğü `val`,
+  - 3+ pair varsa en büyüğü `train`'e ayrılır, kalanlardan budget ile `test` doldurulur, en az bir pair `val`'a kalır.
+  Böylece flame_video_nofire'ın train'de hiç olmaması (ve val/test'in domain shift'le bombalanması) önlenir. `scripts/check_leakage.py` her index güncellemesinden sonra çalıştırılmalıdır.
 - **Eşik politikası (yanlış-negatif öncelikli):** Her epoch'ta validasyon üzerinde eşik taraması yapılır. Aday eşikler içinden **recall'ı en yüksek seviyenin %2 yakınında tutarken FPR'ı minimize eden** nokta seçilir; alarm eşiği `THRESHOLD_ALARM_MIN=0.25` ile alttan kıstırılır.
-- **Metrik raporlama:** Her epoch için `acc, bal_acc, precision, recall, F1, AUC, AP, specificity, FPR, ECE, Brier, confusion matrix` ve kaynak (source) bazında dağılımlar yazdırılır + `outputs/metrics_*.json` dosyasına kaydedilir.
+- **Source-aware eşik denetimi:** Genel eşiğe ek olarak her source (örn. `binary_root`, `flame3`, `flame_video_nofire`) için ayrı bir tarama yapılır. Her source'ta `recall ≥ 0.98` koşulunu sağlayan ve FPR'ı en düşük olan eşik seçilir. Kaynaklar arasındaki eşik farklılıkları log'a, `metrics_*.json`'a ve checkpoint meta'sına (`val_per_source_thresholds`, `test_per_source_thresholds`) yazılır — bir kaynağın eşik beklentisi diğerinden çok farklı ise bu açıkça görülür.
+- **Metrik raporlama:** Her epoch için `acc, bal_acc, precision, recall, F1, AUC, AP, specificity, FPR, ECE, Brier, confusion matrix` ve kaynak (source) bazında dağılımlar yazdırılır + `outputs/metrics_*.json` dosyasına kaydedilir. Test sonunda `binary_root / flame3 / flame_video_nofire` için tam metrik tablosu (acc / bal_acc / P / R / F1 / spec / FPR / n) ayrı ayrı listelenir.
+- **Augmentation politikası:** Augmentation (RGB photometric, random erase, thermal noise, geometric) **yalnızca train DataLoader'ında** uygulanır. Validation ve test loader'larında hiçbir augmentation, noise veya duplicate yoktur — ölçümler temiz veri üzerinde alınır. Robustness testleri için `src/eval/robustness_eval.py` ayrı offline modüldür.
 - **Checkpoint seçimi:** Varsayılan `--selection_metric f1_balacc` (`0.5*F1 + 0.5*BalAcc`); alternatif `--selection_metric realistic` ise `F1 + BalAcc + AP - 0.5*FPR` kompozit skoru kullanır.
 
 ## Test
