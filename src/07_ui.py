@@ -30,13 +30,50 @@ from src.inference.video import run_video_inference  # noqa: E402
 from src.risk.scoring import build_risk_table  # noqa: E402
 
 try:  # noqa: E402
-    from config import CKPT_FUSION, CKPT_RGB, INFERENCE_DEFAULT, OUTPUTS_DIR, RISK_SCORE_WEIGHTS
+    from config import (
+        CKPT_DUAL_BRANCH,
+        CKPT_FUSION,
+        CKPT_RGB,
+        INFERENCE_DEFAULT,
+        MODELS_DIR,
+        OUTPUTS_DIR,
+        RISK_SCORE_WEIGHTS,
+    )
 except Exception:  # pragma: no cover
     CKPT_FUSION = Path("models/fusion.pt")
+    CKPT_DUAL_BRANCH = Path("models/dual_branch.pt")
     CKPT_RGB = Path("models/rgb.pt")
+    MODELS_DIR = Path("models")
     INFERENCE_DEFAULT = {}
     OUTPUTS_DIR = Path("outputs")
     RISK_SCORE_WEIGHTS = {}
+
+
+def _checkpoint_options() -> list[str]:
+    """Return existing checkpoints under ``MODELS_DIR`` plus the canonical
+    fusion / dual_branch / rgb names. Existing files come first so the user
+    sees the trained ``dual_branch.pt`` immediately when present."""
+    seen: list[str] = []
+
+    def _add(p: Path) -> None:
+        s = str(p)
+        if s not in seen:
+            seen.append(s)
+
+    for cand in (CKPT_DUAL_BRANCH, CKPT_FUSION, CKPT_RGB):
+        if Path(cand).is_file():
+            _add(cand)
+    try:
+        for p in sorted(Path(MODELS_DIR).glob("*.pt")):
+            if p.is_file():
+                _add(p)
+    except Exception:
+        pass
+    if not seen:
+        # Always offer the canonical names so the dropdown isn't empty.
+        for cand in (CKPT_DUAL_BRANCH, CKPT_FUSION, CKPT_RGB):
+            _add(cand)
+    return seen
 
 
 st.set_page_config(page_title="Fire Risk Review", layout="wide")
@@ -69,6 +106,11 @@ PRESETS: list[InferPreset] = [
             "texture_prob_max": 0.0,
             "small_fire_boost": 1.0,
             "growth_upscale": 1.0,
+            "prob_temporal_blend": 0.0,
+            "burst_min_frames": 3,
+            "burst_threshold_frac": 1.0,
+            "auto_step_long_video": True,
+            "stream_buffer_reduce": True,
         },
     ),
     InferPreset(
@@ -85,6 +127,11 @@ PRESETS: list[InferPreset] = [
             "adaptive_step": True,
             "temporal_guard": True,
             "min_component_area": float(INFERENCE_DEFAULT.get("min_component_area", 0.01) or 0.01),
+            "prob_temporal_blend": 0.2,
+            "burst_min_frames": 3,
+            "burst_threshold_frac": 1.0,
+            "auto_step_long_video": True,
+            "stream_buffer_reduce": True,
         },
     ),
     InferPreset(
@@ -101,6 +148,11 @@ PRESETS: list[InferPreset] = [
             "adaptive_step": True,
             "temporal_guard": True,
             "min_component_area": float(INFERENCE_DEFAULT.get("min_component_area", 0.01) or 0.01),
+            "prob_temporal_blend": 0.25,
+            "burst_min_frames": 4,
+            "burst_threshold_frac": 1.0,
+            "auto_step_long_video": True,
+            "stream_buffer_reduce": True,
         },
     ),
 ]
@@ -178,9 +230,11 @@ def _run_inference(
             ckpt_eff = "models/rgb.pt"
 
     out_csv = run_video_inference(
-        rgb_path,
+        rgb_video_path=rgb_path,
         th_video_path=th_path,
-        ckpt_path=ckpt_eff,
+        ckpt_fusion=str(ckpt_path) if th_path else None,
+        ckpt_rgb=str(ckpt_eff) if not th_path else None,
+        ckpt_thermal=None,
         mode="fusion" if th_path else "rgb",
         size=int(a.get("size", 224)),
         step_frames=int(a.get("step", 6)),
@@ -197,6 +251,11 @@ def _run_inference(
         growth_upscale=float(a.get("growth_upscale", INFERENCE_DEFAULT.get("growth_upscale", 1.2))),
         benchmark=True,
         benchmark_out=str(bench_json),
+        prob_temporal_blend=float(a.get("prob_temporal_blend", 0.0)),
+        burst_min_frames=int(a.get("burst_min_frames", 3)),
+        burst_threshold_frac=float(a.get("burst_threshold_frac", 1.0)),
+        auto_step_long_video=bool(a.get("auto_step_long_video", False)),
+        stream_buffer_reduce=bool(a.get("stream_buffer_reduce", True)),
     )
     try:
         df_pred = pd.read_csv(out_csv)
@@ -333,13 +392,31 @@ with tab_infer:
     c1, c2 = st.columns([1, 1])
     with c1:
         up_rgb = st.file_uploader("RGB video", type=["mp4", "avi", "mov", "mkv", "webm"], key="up_rgb")
+        rgb_uri = st.text_input(
+            "RGB: yerel tam path veya rtsp/http/https URL (yüklemeye alternatif)",
+            "",
+            key="rgb_uri",
+            help="Büyük videolarda tarayıcı yükleme limitinden kaçınmak için sunucudaki dosya yolunu veya akış URL’sini buraya yazın.",
+        )
         up_th = st.file_uploader("Thermal video (opsiyonel)", type=["mp4", "avi", "mov", "mkv", "webm"], key="up_th")
+        th_uri = st.text_input("Thermal: path veya URI (opsiyonel)", "", key="th_uri")
         preset_key = st.radio("Mod", [p.key for p in PRESETS], index=1, horizontal=True)
         preset = next(p for p in PRESETS if p.key == preset_key)
         st.caption(f"**{preset.title}** — {preset.description}")
-        ckpt_choice = st.selectbox("Checkpoint", options=[str(CKPT_FUSION), str(CKPT_RGB)], index=0)
+        ckpt_options = _checkpoint_options()
+        ckpt_choice = st.selectbox("Checkpoint", options=ckpt_options, index=0)
+        if not Path(ckpt_choice).is_file():
+            st.warning(
+                f"Seçilen checkpoint dosyası bulunamadı: `{ckpt_choice}`. "
+                "Eğitim sonunda elde edilen `dual_branch.pt` veya `fusion.pt` "
+                f"dosyasını `{MODELS_DIR}` klasörüne koyun."
+            )
         out_base = st.text_input("Çıktı klasörü", str(OUTPUTS_DIR / "ui_runs"))
-        run_btn = st.button("▶ Çalıştır", type="primary", disabled=(up_rgb is None))
+        run_btn = st.button(
+            "▶ Çalıştır",
+            type="primary",
+            disabled=(up_rgb is None and not bool(rgb_uri.strip())),
+        )
 
     with c2:
         st.caption(
@@ -348,21 +425,33 @@ with tab_infer:
             "açılır panellerin içinde gizlidir."
         )
 
-    if run_btn and up_rgb is not None:
-        rgb_path = _save_upload(up_rgb)
-        th_path = _save_upload(up_th) if up_th is not None else None
-        out_dir = Path(out_base) / _format_run_id()
-
-        with st.status("Çalışıyor…", expanded=False) as status:
-            t0 = time.perf_counter()
-            try:
-                result = _run_inference(rgb_path, th_path, preset, ckpt_choice, out_dir)
-                dt = time.perf_counter() - t0
-                status.update(label=f"Tamamlandı ({dt:.1f}s)", state="complete")
-            except Exception as e:
-                status.update(label="Hata", state="error")
-                st.exception(e)
-                result = None
+    if run_btn:
+        if rgb_uri.strip():
+            rgb_path = rgb_uri.strip()
+        elif up_rgb is not None:
+            rgb_path = _save_upload(up_rgb)
+        else:
+            st.error("RGB video gerekli: dosya yükleyin veya path/URL girin.")
+            rgb_path = ""
+        result = None
+        if rgb_path:
+            if th_uri.strip():
+                th_path = th_uri.strip()
+            elif up_th is not None:
+                th_path = _save_upload(up_th)
+            else:
+                th_path = None
+            out_dir = Path(out_base) / _format_run_id()
+            with st.status("Çalışıyor…", expanded=False) as status:
+                t0 = time.perf_counter()
+                try:
+                    result = _run_inference(rgb_path, th_path, preset, ckpt_choice, out_dir)
+                    dt = time.perf_counter() - t0
+                    status.update(label=f"Tamamlandı ({dt:.1f}s)", state="complete")
+                except Exception as e:
+                    status.update(label="Hata", state="error")
+                    st.exception(e)
+                    result = None
 
         if result is not None:
             df_scored = result["df_scored"]
