@@ -1,4 +1,4 @@
-"""Data leakage audit for ``data/master_index.parquet``.
+"""Data leakage audit for ``master_index.parquet``.
 
 Checks whether the same physical sample (RGB path, thermal path, key,
 split_group) or the same underlying video / scene (heuristic on filename
@@ -7,13 +7,24 @@ stems) appears in more than one of train / val / test splits.
 Usage::
 
     python scripts/check_leakage.py
+    python scripts/check_leakage.py --csv /kaggle/working/data/master_index.parquet
+    FLAME_MASTER_INDEX=/.../master_index.parquet python scripts/check_leakage.py
+
+Path resolution order:
+
+1. ``--csv`` CLI argument (if provided)
+2. ``FLAME_MASTER_INDEX`` environment variable
+3. ``<project_root>/data/master_index.parquet`` (default)
 
 Exit code is 1 when any kind of leakage is detected, 0 otherwise.
-A detailed CSV is written to ``outputs/leakage_report.csv``.
+A detailed CSV is written to ``outputs/leakage_report.csv`` (or
+``$FLAME_OUTPUTS_DIR/leakage_report.csv`` when that env is set).
 """
 
 from __future__ import annotations
 
+import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -22,8 +33,26 @@ import pandas as pd
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-INDEX_PATH = PROJECT_ROOT / "data" / "master_index.parquet"
-REPORT_PATH = PROJECT_ROOT / "outputs" / "leakage_report.csv"
+DEFAULT_INDEX_PATH = PROJECT_ROOT / "data" / "master_index.parquet"
+DEFAULT_REPORT_PATH = PROJECT_ROOT / "outputs" / "leakage_report.csv"
+
+
+def _resolve_index_path(cli_csv: str | None) -> Path:
+    """``--csv`` > ``FLAME_MASTER_INDEX`` env > default."""
+    if cli_csv:
+        return Path(cli_csv).expanduser().resolve()
+    env = os.environ.get("FLAME_MASTER_INDEX", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    return DEFAULT_INDEX_PATH
+
+
+def _resolve_report_path() -> Path:
+    """``$FLAME_OUTPUTS_DIR/leakage_report.csv`` > default."""
+    env = os.environ.get("FLAME_OUTPUTS_DIR", "").strip()
+    if env:
+        return (Path(env).expanduser() / "leakage_report.csv").resolve()
+    return DEFAULT_REPORT_PATH
 
 REQUIRED_COLUMNS = [
     "path_rgb",
@@ -126,12 +155,28 @@ def _summarize(name: str, key_col: str, collisions: pd.DataFrame) -> dict:
     }
 
 
-def main() -> int:
-    if not INDEX_PATH.exists():
-        print(f"ERROR: index not found at {INDEX_PATH}", file=sys.stderr)
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--csv",
+        default=None,
+        help="Path to master_index.parquet. Overrides FLAME_MASTER_INDEX env.",
+    )
+    args = parser.parse_args(argv)
+
+    index_path = _resolve_index_path(args.csv)
+    report_path = _resolve_report_path()
+
+    if not index_path.exists():
+        print(f"ERROR: index not found at {index_path}", file=sys.stderr)
+        print(
+            "Hint: pass --csv /path/to/master_index.parquet or set "
+            "FLAME_MASTER_INDEX env var.",
+            file=sys.stderr,
+        )
         return 2
 
-    df = pd.read_parquet(INDEX_PATH)
+    df = pd.read_parquet(index_path)
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         print(
@@ -146,7 +191,7 @@ def main() -> int:
     df["base_rgb"] = df["path_rgb"].map(_base_id_from_path)
     df["base_th"] = df["path_th"].map(_base_id_from_path)
 
-    print(f"Loaded {len(df)} rows from {INDEX_PATH}")
+    print(f"Loaded {len(df)} rows from {index_path}")
     print("Split distribution:")
     print(df["split"].value_counts().to_string())
     print("Source distribution:")
@@ -188,11 +233,11 @@ def main() -> int:
                 ]
             )
 
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     if all_leaks:
         report = pd.concat(all_leaks, ignore_index=True)
-        report.to_csv(REPORT_PATH, index=False)
-        print(f"\nLeakage report written to: {REPORT_PATH}  ({len(report)} rows)")
+        report.to_csv(report_path, index=False)
+        print(f"\nLeakage report written to: {report_path}  ({len(report)} rows)")
     else:
         empty = pd.DataFrame(
             columns=[
@@ -207,8 +252,8 @@ def main() -> int:
                 "path_th",
             ]
         )
-        empty.to_csv(REPORT_PATH, index=False)
-        print(f"\nLeakage report written to: {REPORT_PATH}  (empty)")
+        empty.to_csv(report_path, index=False)
+        print(f"\nLeakage report written to: {report_path}  (empty)")
 
     print("\n" + "=" * 72)
     print("SUMMARY")
