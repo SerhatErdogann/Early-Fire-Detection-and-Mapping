@@ -176,19 +176,44 @@ def _partition_flame_video_pairs(
     target_test_frames: int = 200,
     max_test_frame_frac: float = 0.42,
 ) -> tuple[set[str], set[str], set[str]]:
-    """
-    Split ``flame_video_nofire`` **pair ids** across train/val/test.
+    """Split ``flame_video_nofire`` **pair ids** across train/val/test.
 
-    All rows in a pair share one split (no leakage). ``test`` is filled first
-    with a **frame budget** (greedy, largest pairs first) so global ``test``
-    ``no_fire`` counts are less often tiny; remaining pairs are split ~82/18
-    train/val by clip count when possible. A **single** leftover clip goes to
-    **val** (not train) so checkpointing on val ``no_fire`` is not near-zero
-    when only two drone pairs exist.
+    All rows in a pair share one split (no group leakage). The policy gives
+    **train priority** so the model is exposed to drone no-fire footage during
+    fitting; otherwise val / test FPR collapses against a domain it has never
+    seen (the previous policy could leave train with zero pairs).
+
+    Adaptive behaviour by available pair count:
+
+    - ``n_pairs == 1`` → all to **train** (val/test fall back to other no-fire
+      sources such as binary_root and flame3).
+    - ``n_pairs == 2`` → larger pair to **train**, smaller to **val**;
+      nothing in test (test no-fire still comes from binary_root and flame3).
+    - ``n_pairs >= 3`` → standard 3-way:
+        * ``train`` always receives the largest pair (model sees this domain);
+        * ``test`` is filled with a frame budget (greedy, largest pairs first
+          from the remaining pool) up to ``target_test_frames`` and capped at
+          ``max_test_frame_frac`` of total frames so it cannot dominate;
+        * at least one pair remains for ``val``;
+        * leftover pairs split ~82/18 train / val by clip count.
     """
     pairs = sorted(set(pair_ids))
-    if not pairs:
+    n_pairs = len(pairs)
+    if n_pairs == 0:
         return set(), set(), set()
+
+    if n_pairs == 1:
+        return set(pairs), set(), set()
+
+    # Deterministic ordering: largest pair first.
+    ordered = sorted(pairs, key=lambda pid: (-int(row_counts.get(pid, 0)), str(pid)))
+
+    if n_pairs == 2:
+        return {ordered[0]}, {ordered[1]}, set()
+
+    # n_pairs >= 3. Always reserve the biggest pair for train.
+    train_seed = ordered[0]
+    test_pool = ordered[1:]
 
     total_frames = int(sum(int(row_counts.get(p, 0)) for p in pairs))
     if total_frames <= 0:
@@ -197,34 +222,29 @@ def _partition_flame_video_pairs(
     cap = min(max(1, int(total_frames * max_test_frame_frac + 1e-9)), total_frames)
     want = min(int(target_test_frames), cap, total_frames)
 
-    # Deterministic: largest pairs first → fewer clips removed from train.
-    ordered = sorted(pairs, key=lambda pid: (-int(row_counts.get(pid, 0)), str(pid)))
-
     p_test: set[str] = set()
     got = 0
-    for pid in ordered:
-        if got >= want:
+    for pid in test_pool:
+        # Stop before consuming the last remaining pair so val gets at least one.
+        if got >= want or len(p_test) >= len(test_pool) - 1:
             break
         p_test.add(pid)
         got += int(row_counts.get(pid, 0))
+    if want >= 1 and not p_test and len(test_pool) >= 2:
+        # Guarantee at least one test pair when caller asked for any test frames.
+        p_test.add(test_pool[0])
 
-    if want >= 1 and not p_test and ordered:
-        p_test.add(ordered[0])
-
-    rest = sorted([p for p in pairs if p not in p_test])
-
+    rest = [p for p in test_pool if p not in p_test]
     if not rest:
-        return set(), set(), p_test
-
-    # Single clip left after reserving test: assign to **val** so early-stopping / tuning
-    # still sees real no_fire footage (train still has strong no_fire from cart/binary/flame).
+        return {train_seed}, set(), p_test
     if len(rest) == 1:
-        return set(), {rest[0]}, p_test
+        return {train_seed}, {rest[0]}, p_test
 
     n_va = max(1, int(round(len(rest) * 0.18)))
     n_va = min(n_va, len(rest) - 1)
     p_val = set(rest[:n_va])
-    p_train = set(rest[n_va:])
+    p_train_extra = set(rest[n_va:])
+    p_train = {train_seed} | p_train_extra
     return p_train, p_val, p_test
 
 
@@ -1134,13 +1154,22 @@ def build_master_index(
             max_test_frame_frac=0.42,
         )
 
+        fr_train = int(sum(pair_counts[p] for p in p_train if p in pair_counts))
+        fr_val = int(sum(pair_counts[p] for p in p_val if p in pair_counts))
         fr_test = int(sum(pair_counts[p] for p in p_test if p in pair_counts))
         print(
             f"[flame_video_nofire] pair split clips: "
             f"train={len(p_train)} val={len(p_val)} test={len(p_test)} "
-            f"(~frames in test splits from this source≈{fr_test})",
+            f"(frames train={fr_train} val={fr_val} test={fr_test})",
             flush=True,
         )
+        if len(p_train) == 0:
+            print(
+                "[flame_video_nofire][WARN] zero pairs assigned to TRAIN — "
+                "model will not learn this no_fire domain. Check pair count "
+                "and _partition_flame_video_pairs policy.",
+                flush=True,
+            )
 
         pid_to_side: dict[str, str] = {}
         for p in p_train:

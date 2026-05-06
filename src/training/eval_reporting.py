@@ -75,6 +75,106 @@ def metrics_per_source(
     return out
 
 
+def source_threshold_recommendations(
+    df_like,
+    ys: np.ndarray,
+    ps: np.ndarray,
+    *,
+    thresholds: np.ndarray | list[float] | None = None,
+    min_recall: float = 0.98,
+    min_samples: int = 20,
+) -> dict[str, dict[str, Any]]:
+    """Per-source threshold recommendations.
+
+    For each ``source`` we run a small sweep and pick the **lowest false
+    positive rate** threshold whose recall is at least ``min_recall``. This is
+    the "miss-no-fires while keeping false alarms manageable" policy from the
+    user's spec.
+
+    If no threshold meets ``min_recall`` for a source we fall back to the
+    threshold that maximises recall (tie-break: minimum FPR). Sources with a
+    single class present or fewer than ``min_samples`` rows are reported as
+    skipped instead of silently dropped.
+
+    Returns a dict keyed by source name. Each entry contains the chosen
+    threshold, its recall / specificity / FPR / F1, and a ``status`` field
+    that says whether the recall target was hit, missed (and we fell back),
+    or the source was skipped entirely.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    df = df_like
+    if df is None or len(df) == 0:
+        return out
+    if "source" not in df.columns or len(df) != len(ys):
+        return out
+    if thresholds is None:
+        thresholds = np.arange(0.30, 0.901, 0.05)
+    src_arr = df["source"].astype(str).to_numpy()
+    for s in sorted(set(src_arr.tolist())):
+        m = src_arr == s
+        n = int(m.sum())
+        if n < int(min_samples):
+            out[s] = {"status": "skipped_too_few", "n": n}
+            continue
+        yy = np.asarray(ys[m], dtype=np.int64)
+        pp = np.asarray(ps[m], dtype=np.float64)
+        if len(set(yy.tolist())) < 2:
+            # Single-class slice: report only FPR / specificity (no recall).
+            ms_pick = None
+            best_t = None
+            best_fpr = None
+            for t in thresholds:
+                ms_t = metrics_at_threshold(yy, pp, float(t))
+                fpr_t = float(ms_t.get("false_positive_rate", float("nan")))
+                if np.isnan(fpr_t):
+                    continue
+                if best_fpr is None or fpr_t < best_fpr:
+                    best_fpr = fpr_t
+                    best_t = float(t)
+                    ms_pick = ms_t
+            out[s] = {
+                "status": "single_class_no_recall",
+                "n": n,
+                "threshold": best_t,
+                "fpr": best_fpr,
+                "specificity": float(ms_pick.get("specificity", float("nan"))) if ms_pick else None,
+            }
+            continue
+
+        # Two-class slice: full sweep.
+        rows: list[dict[str, float]] = []
+        for t in thresholds:
+            ms_t = metrics_at_threshold(yy, pp, float(t))
+            rows.append(
+                {
+                    "threshold": float(t),
+                    "recall": float(ms_t.get("recall", 0.0)),
+                    "fpr": float(ms_t.get("false_positive_rate", 1.0)),
+                    "specificity": float(ms_t.get("specificity", 0.0)),
+                    "f1": float(ms_t.get("f1", 0.0)),
+                    "precision": float(ms_t.get("precision", 0.0)),
+                }
+            )
+        eligible = [r for r in rows if r["recall"] >= float(min_recall)]
+        if eligible:
+            chosen = sorted(eligible, key=lambda r: (r["fpr"], -r["f1"]))[0]
+            status = "ok"
+        else:
+            chosen = sorted(rows, key=lambda r: (-r["recall"], r["fpr"]))[0]
+            status = "below_recall_target"
+        out[s] = {
+            "status": status,
+            "n": n,
+            "threshold": chosen["threshold"],
+            "recall": chosen["recall"],
+            "fpr": chosen["fpr"],
+            "specificity": chosen["specificity"],
+            "f1": chosen["f1"],
+            "precision": chosen["precision"],
+        }
+    return out
+
+
 def threshold_sweep_grid(
     vy: np.ndarray,
     vp: np.ndarray,

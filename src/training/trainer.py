@@ -20,6 +20,7 @@ from .eval_reporting import (
     sanitize_for_json,
     select_threshold_policies,
     realistic_selection_score,
+    source_threshold_recommendations,
     threshold_sweep_grid,
 )
 from .losses import build_loss
@@ -846,6 +847,41 @@ def train_one_run(
                     },
                 )
 
+        # Source-aware threshold recommendations on val: pick the threshold per
+        # source that keeps recall >= 0.98 and minimises FPR. This makes it
+        # explicit when a single source (e.g. binary_root) needs a much higher
+        # threshold than the global recommendation.
+        try:
+            src_thr_recs = source_threshold_recommendations(
+                va_eval, vy, vp, min_recall=0.98, min_samples=20
+            )
+        except Exception as exc:  # noqa: BLE001
+            src_thr_recs = {}
+            print(f"[val] source threshold sweep skipped: {type(exc).__name__}: {exc}")
+        if src_thr_recs:
+            compact = {}
+            for s, info in src_thr_recs.items():
+                if info.get("status") == "ok":
+                    compact[s] = (
+                        f"thr={info['threshold']:.2f} recall={info['recall']:.3f} fpr={info['fpr']:.3f}"
+                    )
+                elif info.get("status") == "below_recall_target":
+                    compact[s] = (
+                        f"thr={info['threshold']:.2f} recall={info['recall']:.3f} fpr={info['fpr']:.3f} "
+                        f"[recall<0.98]"
+                    )
+                elif info.get("status") == "single_class_no_recall":
+                    thr = info.get("threshold")
+                    fpr = info.get("fpr")
+                    compact[s] = (
+                        f"thr={thr:.2f} fpr={fpr:.3f} [single_class:no recall]"
+                        if thr is not None and fpr is not None
+                        else "[single_class]"
+                    )
+                else:
+                    compact[s] = f"[{info.get('status', 'skipped')}, n={info.get('n', 0)}]"
+            print("[val] per_source threshold (recall>=0.98, min FPR):", compact)
+
         # Save false positives from validation (y=0, pred=1)
         pred_val = (vp >= float(best_thr)).astype(np.int64)
         fp_mask = (vy == 0) & (pred_val == 1)
@@ -880,8 +916,14 @@ def train_one_run(
         tm = metrics_at_threshold(ty, tp, best_thr)
         print(
             f"Test acc={tm['acc']:.3f} bal_acc={tm['bal_acc']:.3f} auc={tm['auc']:.3f} ap={tm['ap']:.3f} "
+            f"P={tm.get('precision', float('nan')):.3f} R={tm.get('recall', float('nan')):.3f} "
+            f"F1={tm.get('f1', float('nan')):.3f} "
             f"spec={tm.get('specificity', float('nan')):.3f} fpr={tm.get('false_positive_rate', float('nan')):.3f}"
         )
+        try:
+            print("Test CM [[TN FP],[FN TP]]:\n", tm["cm"])
+        except Exception:
+            pass
         test_per_source = metrics_per_source(test_df, ty, tp, float(best_thr), min_samples=5)
         if test_per_source:
             parts = [
@@ -890,6 +932,23 @@ def train_one_run(
             ]
             tail = " ..." if len(test_per_source) > 10 else ""
             print("[test] per_source (shared thr):", " | ".join(parts) + tail)
+            # Full per-source table — accuracy, bal_acc, precision, recall, F1,
+            # specificity, FPR — so binary_root / flame3 / flame_video_nofire
+            # can each be inspected as the user requested.
+            print("[test] per_source full table (acc / bal_acc / P / R / F1 / spec / FPR / n):")
+            for s in sorted(test_per_source.keys()):
+                r = test_per_source[s]
+                print(
+                    f"  {s:<22s} "
+                    f"acc={float(r.get('acc', float('nan'))):.3f} "
+                    f"bal={float(r.get('bal_acc', float('nan'))):.3f} "
+                    f"P={float(r.get('precision', float('nan'))):.3f} "
+                    f"R={float(r.get('recall', float('nan'))):.3f} "
+                    f"F1={float(r.get('f1', float('nan'))):.3f} "
+                    f"spec={float(r.get('specificity', float('nan'))):.3f} "
+                    f"fpr={float(r.get('false_positive_rate', float('nan'))):.3f} "
+                    f"n={int(r.get('n', 0))}"
+                )
 
         if extra_test_loader is not None:
             ey, ep_probs = eval_probs(model, extra_test_loader, device, temperature=T)
@@ -954,6 +1013,48 @@ def train_one_run(
                 print(f"[eval] threshold_policy_csv -> {threshold_policy_csv}")
             except Exception as e:
                 print(f"[eval] threshold_policy sweep skipped: {type(e).__name__}: {e}")
+
+            # Source-aware threshold sweep on TEST as well so the user can see
+            # whether each domain (binary_root, flame3, flame_video_nofire)
+            # would need a different threshold to keep recall >= 0.98.
+            try:
+                test_src_thr_recs = source_threshold_recommendations(
+                    test_df, ty, tp, min_recall=0.98, min_samples=20
+                )
+            except Exception as exc:  # noqa: BLE001
+                test_src_thr_recs = {}
+                print(
+                    f"[test] source threshold sweep skipped: {type(exc).__name__}: {exc}"
+                )
+            if test_src_thr_recs:
+                compact_t = {}
+                for s, info in test_src_thr_recs.items():
+                    if info.get("status") == "ok":
+                        compact_t[s] = (
+                            f"thr={info['threshold']:.2f} R={info['recall']:.3f} "
+                            f"FPR={info['fpr']:.3f}"
+                        )
+                    elif info.get("status") == "below_recall_target":
+                        compact_t[s] = (
+                            f"thr={info['threshold']:.2f} R={info['recall']:.3f} "
+                            f"FPR={info['fpr']:.3f} [R<0.98]"
+                        )
+                    elif info.get("status") == "single_class_no_recall":
+                        thr = info.get("threshold")
+                        fpr = info.get("fpr")
+                        compact_t[s] = (
+                            f"thr={thr:.2f} FPR={fpr:.3f} [single_class]"
+                            if thr is not None and fpr is not None
+                            else "[single_class]"
+                        )
+                    else:
+                        compact_t[s] = (
+                            f"[{info.get('status', 'skipped')}, n={info.get('n', 0)}]"
+                        )
+                print(
+                    "[test] per_source threshold (recall>=0.98, min FPR):",
+                    compact_t,
+                )
             try:
                 seq = compute_sequence_alarm_summary(
                     test_df,
@@ -1013,6 +1114,8 @@ def train_one_run(
                     "temperature": float(T),
                     "worst_source_by_fpr": worst_source_by_fpr,
                     "worst_source_by_recall": worst_source_by_recall,
+                    "val_per_source_thresholds": sanitize_for_json(src_thr_recs),
+                    "test_per_source_thresholds": sanitize_for_json(test_src_thr_recs),
                     "saved_at_utc": datetime.now(timezone.utc).isoformat(),
                 },
                 out_ckpt,
@@ -1054,7 +1157,9 @@ def train_one_run(
                 "selection_metric": str(sel_norm),
                 "training_class_balance": training_class_balance,
                 "val_per_source": per_source,
+                "val_per_source_thresholds": src_thr_recs,
                 "test_per_source": test_per_source,
+                "test_per_source_thresholds": test_src_thr_recs,
                 "gap_metrics": {
                     "fpr_gap": (
                         float(vm.get("false_positive_rate", float("nan")))
