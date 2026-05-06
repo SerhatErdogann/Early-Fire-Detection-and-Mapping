@@ -1,6 +1,8 @@
 """Training-time metric reporting: source breakdowns and threshold sweep tables."""
 from __future__ import annotations
 
+import warnings
+from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
@@ -11,6 +13,40 @@ from .metrics import (
     expected_calibration_error,
     metrics_at_threshold,
 )
+
+
+@contextmanager
+def _suppress_single_class_warnings():
+    """Silence sklearn warnings raised when a slice has only one class.
+
+    The single-class branches in :func:`source_threshold_recommendations`
+    intentionally call ``metrics_at_threshold`` on slices where only
+    ``no_fire`` is present (e.g. ``flame_video_nofire``) — this triggers the
+    ``y_pred contains classes not in y_true`` UserWarning per threshold and
+    pollutes the trainer log. The numbers themselves remain correct.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=".*y_pred contains classes not in y_true.*",
+            category=UserWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=".*Recall is ill-defined.*",
+            category=UserWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=".*Precision is ill-defined.*",
+            category=UserWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=".*F-score is ill-defined.*",
+            category=UserWarning,
+        )
+        yield
 
 
 def _jsonable_metric_row(m: dict) -> dict[str, Any]:
@@ -101,6 +137,27 @@ def source_threshold_recommendations(
     that says whether the recall target was hit, missed (and we fell back),
     or the source was skipped entirely.
     """
+    # Suppress per-threshold sklearn warnings raised on single-class or
+    # tail-end thresholds; they otherwise spam the trainer log without
+    # changing any of the reported numbers.
+    with _suppress_single_class_warnings():
+        return _source_threshold_recommendations_impl(
+            df_like, ys, ps, thresholds=thresholds, min_recall=min_recall, min_samples=min_samples
+        )
+
+
+def _source_threshold_recommendations_impl(
+    df_like,
+    ys: np.ndarray,
+    ps: np.ndarray,
+    *,
+    thresholds: np.ndarray | list[float] | None = None,
+    min_recall: float = 0.98,
+    min_samples: int = 20,
+) -> dict[str, dict[str, Any]]:
+    """Body of :func:`source_threshold_recommendations`. Kept separate so the
+    public function can wrap it in a single ``warnings.catch_warnings`` block
+    without re-indenting the loop."""
     out: dict[str, dict[str, Any]] = {}
     df = df_like
     if df is None or len(df) == 0:
@@ -119,29 +176,42 @@ def source_threshold_recommendations(
         yy = np.asarray(ys[m], dtype=np.int64)
         pp = np.asarray(ps[m], dtype=np.float64)
         if len(set(yy.tolist())) < 2:
-            # Single-class slice: report only FPR / specificity (no recall).
-            ms_pick = None
-            best_t = None
-            best_fpr = None
+            # Single-class slice: only FPR / specificity make sense. Compute
+            # them inline (without sklearn) to avoid the per-threshold
+            # ``y_pred contains classes not in y_true`` warnings sklearn
+            # raises when recall / precision / F1 are ill-defined.
+            best_t: float | None = None
+            best_fpr: float | None = None
+            best_spec: float | None = None
+            single_label = int(yy[0])
             for t in thresholds:
-                ms_t = metrics_at_threshold(yy, pp, float(t))
-                fpr_t = float(ms_t.get("false_positive_rate", float("nan")))
+                pred = (pp >= float(t)).astype(np.int64)
+                if single_label == 0:
+                    fp = int((pred == 1).sum())
+                    tn = int((pred == 0).sum())
+                    fpr_t = fp / max(1, fp + tn)
+                    spec_t = tn / max(1, fp + tn)
+                else:
+                    # Single-class fire slice: FPR is undefined; report 0/1 by convention.
+                    fpr_t = float("nan")
+                    spec_t = float("nan")
                 if np.isnan(fpr_t):
                     continue
                 if best_fpr is None or fpr_t < best_fpr:
-                    best_fpr = fpr_t
+                    best_fpr = float(fpr_t)
+                    best_spec = float(spec_t)
                     best_t = float(t)
-                    ms_pick = ms_t
             out[s] = {
                 "status": "single_class_no_recall",
                 "n": n,
+                "single_label": single_label,
                 "threshold": best_t,
                 "fpr": best_fpr,
-                "specificity": float(ms_pick.get("specificity", float("nan"))) if ms_pick else None,
+                "specificity": best_spec,
             }
             continue
 
-        # Two-class slice: full sweep.
+        # Two-class slice: full sweep (sklearn warnings suppressed at caller).
         rows: list[dict[str, float]] = []
         for t in thresholds:
             ms_t = metrics_at_threshold(yy, pp, float(t))
@@ -303,6 +373,20 @@ def realistic_selection_score(vm: dict) -> float:
     ap = _safe_metric(vm.get("ap"))
     fpr = _safe_metric(vm.get("false_positive_rate"))
     return f1 + bal_acc + ap - 0.5 * fpr
+
+
+def recall_fpr_selection_key(vm: dict) -> tuple:
+    """Sorting key for model selection under ``recall_fpr`` policy.
+
+    Lexicographically higher is better: prefer ``recall >= 0.98``, then higher
+    recall, lower FPR (via ``-FPR``), then balanced accuracy / F1.
+    """
+    rec = float(vm.get("recall") or 0.0)
+    fpr = float(vm.get("false_positive_rate") or 1.0)
+    bal = float(vm.get("bal_acc") or 0.0)
+    f1 = float(vm.get("f1") or 0.0)
+    meets = int(rec >= 0.98)
+    return (meets, rec, -fpr, bal, f1)
 
 
 def sanitize_for_json(obj: Any) -> Any:

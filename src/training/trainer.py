@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from .eval_reporting import (
     metrics_per_source,
+    recall_fpr_selection_key,
     sanitize_for_json,
     select_threshold_policies,
     realistic_selection_score,
@@ -39,7 +40,7 @@ from ..data import FlameDataset
 from .sequence_metrics import compute_sequence_alarm_summary
 from ..data.path_filter import filter_df_existing_paths
 from ..data.split import _group_split_three_way, split_train_val_extra
-from ..models import make_classifier, get_model_config
+from ..models import FUSION_DUAL_FAMILIES, make_classifier, get_model_config
 
 try:
     from config import TRAIN_DEFAULT, MODELS_DIR, OUTPUTS_DIR, THRESHOLD_ALARM_MIN
@@ -364,6 +365,69 @@ def _sample_weights(
     return sw.values.astype(np.float32)
 
 
+def _is_fusion_dual_family(mf: str) -> bool:
+    return str(mf or "").lower() in FUSION_DUAL_FAMILIES
+
+
+def _set_rgb_encoder_trainable(model: torch.nn.Module, trainable: bool) -> None:
+    for name, p in model.named_parameters():
+        if name.startswith(("rgb_branch.", "rgb_fx.")):
+            p.requires_grad = bool(trainable)
+
+
+def build_optimizer_with_thermal_multiplier(
+    model: torch.nn.Module,
+    *,
+    mf: str,
+    lr: float,
+    weight_decay: float,
+    thermal_lr_mult: float,
+) -> torch.optim.Optimizer:
+    """AdamW with optional LR boost on thermal encoders."""
+    mf_l = str(mf or "").lower()
+    if not _is_fusion_dual_family(mf_l):
+        return torch.optim.AdamW(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
+    rgb_p: list[torch.nn.Parameter] = []
+    th_p: list[torch.nn.Parameter] = []
+    rest_p: list[torch.nn.Parameter] = []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if name.startswith("rgb_branch.") or name.startswith("rgb_fx."):
+            rgb_p.append(p)
+        elif name.startswith("th_branch.") or name.startswith("th_fx."):
+            th_p.append(p)
+        else:
+            rest_p.append(p)
+    groups: list[dict] = []
+    lr_b = float(lr)
+    wdec = float(weight_decay)
+    tmul = float(thermal_lr_mult)
+    if rgb_p:
+        groups.append({"params": rgb_p, "lr": lr_b})
+    if th_p:
+        groups.append({"params": th_p, "lr": lr_b * tmul})
+    if rest_p:
+        groups.append({"params": rest_p, "lr": lr_b})
+    if not groups:
+        return torch.optim.AdamW(model.parameters(), lr=lr_b, weight_decay=wdec)
+    return torch.optim.AdamW(groups, weight_decay=wdec)
+
+
+def append_experiment_csv_row(csv_path: str | Path, row: dict) -> None:
+    import csv as _csv
+
+    p = Path(csv_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    cols = sorted(row.keys())
+    new_file = not p.exists()
+    with p.open("a", encoding="utf-8", newline="") as f:
+        w = _csv.DictWriter(f, fieldnames=cols)
+        if new_file:
+            w.writeheader()
+        w.writerow(row)
+
+
 def train_one_run(
     csv_path,
     mode="fusion",
@@ -402,6 +466,13 @@ def train_one_run(
     selection_metric: str = "f1_balacc",
     source_weights: str | dict | None = None,
     modal_dropout_p: float = 0.0,
+    thermal_init: str = "mean_rgb",
+    freeze_rgb_epochs: int = 0,
+    thermal_lr_mult: float = 1.0,
+    label_smoothing: float = 0.05,
+    balanced_thermal_aug: bool = True,
+    experiment_log_csv: str | None = None,
+    experiment_name: str | None = None,
 ):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     use_cuda = torch.cuda.is_available()
@@ -421,7 +492,7 @@ def train_one_run(
         mode = "rgb"
     elif mf == "thermal_baseline":
         mode = "thermal"
-    elif mf in ("early_fusion", "dual_branch_fusion"):
+    elif mf == "early_fusion" or _is_fusion_dual_family(mf):
         mode = "fusion"
 
     df, drop_tr = filter_df_existing_paths(df, mode=mode)
@@ -433,6 +504,19 @@ def train_one_run(
     va = va.reset_index(drop=True)
     test_df = test_df.reset_index(drop=True)
     extra_test_df = extra_test_df.reset_index(drop=True)
+
+    thermal_norm = str(thermal_norm) if thermal_norm is not None else str(TRAIN_DEFAULT.get("thermal_norm", "percentile"))
+    thermal_mu_es = thermal_sig_es = None
+    if thermal_norm.strip().lower() == "train_zscore":
+        from ..data.thermal_stats import estimate_thermal_mu_sigma
+
+        thermal_mu_es, thermal_sig_es = estimate_thermal_mu_sigma(
+            tr, path_col="path_th", max_samples=min(800, len(tr))
+        )
+        print(
+            f"[train] thermal train_zscore from TRAIN split: mu={thermal_mu_es:.6g} "
+            f"sigma={thermal_sig_es:.6g}"
+        )
 
     print(f"\n[{mode}/{mf}] train={len(tr)} | val={len(va)} | test={len(test_df)} | extra_test={len(extra_test_df)}")
     label_train = _label_counts_dict(tr)
@@ -514,7 +598,14 @@ def train_one_run(
         )
 
     in_ch, _ = get_model_config(mode)
-    model = make_classifier(mf, backbone, mode, num_classes=2, pretrained=True).to(device)
+    model = make_classifier(
+        mf,
+        backbone,
+        mode,
+        num_classes=2,
+        pretrained=True,
+        thermal_init=str(thermal_init or "mean_rgb"),
+    ).to(device)
     trainable_params = sum(int(p.numel()) for p in model.parameters() if p.requires_grad)
     total_params = sum(int(p.numel()) for p in model.parameters())
     print(f"[train] params: trainable={trainable_params:,} total={total_params:,}")
@@ -551,7 +642,6 @@ def train_one_run(
     )
     prefetch_factor = int(prefetch_factor) if prefetch_factor is not None else int(TRAIN_DEFAULT.get("prefetch_factor", 2))
     pin_memory = bool(pin_memory) if pin_memory is not None else bool(TRAIN_DEFAULT.get("pin_memory", use_cuda))
-    thermal_norm = str(thermal_norm) if thermal_norm is not None else str(TRAIN_DEFAULT.get("thermal_norm", "percentile"))
     loader_common = {
         "batch_size": bs,
         "num_workers": num_workers,
@@ -571,7 +661,16 @@ def train_one_run(
     eff_bs = int(bs) * max(1, int(grad_accum_steps))
     print(f"[train] effective_batch_size={eff_bs} (bs={int(bs)} x grad_accum_steps={int(max(1, grad_accum_steps))})")
 
-    train_ds = FlameDataset(tr, mode=mode, size=size, train=True, thermal_norm=thermal_norm)
+    train_ds = FlameDataset(
+        tr,
+        mode=mode,
+        size=size,
+        train=True,
+        thermal_norm=thermal_norm,
+        thermal_mu=thermal_mu_es,
+        thermal_sigma=thermal_sig_es,
+        balanced_thermal_aug=balanced_thermal_aug,
+    )
     if loss_mode == "balanced_sampler":
         extra0 = _extra_hard_negative_class0_indices(tr, hard_paths, hard_keys)
         if extra0:
@@ -591,19 +690,46 @@ def train_one_run(
             **loader_common,
         )
     val_loader = DataLoader(
-        FlameDataset(va, mode=mode, size=size, train=False, thermal_norm=thermal_norm),
+        FlameDataset(
+            va,
+            mode=mode,
+            size=size,
+            train=False,
+            thermal_norm=thermal_norm,
+            thermal_mu=thermal_mu_es,
+            thermal_sigma=thermal_sig_es,
+            balanced_thermal_aug=False,
+        ),
         shuffle=False,
         **loader_common,
     )
     test_loader = DataLoader(
-        FlameDataset(test_df, mode=mode, size=size, train=False, thermal_norm=thermal_norm),
+        FlameDataset(
+            test_df,
+            mode=mode,
+            size=size,
+            train=False,
+            thermal_norm=thermal_norm,
+            thermal_mu=thermal_mu_es,
+            thermal_sigma=thermal_sig_es,
+            balanced_thermal_aug=False,
+        ),
         shuffle=False,
         **loader_common,
     )
     extra_test_loader = None
     if len(extra_test_df) > 0:
         extra_test_loader = DataLoader(
-            FlameDataset(extra_test_df, mode=mode, size=size, train=False, thermal_norm=thermal_norm),
+            FlameDataset(
+                extra_test_df,
+                mode=mode,
+                size=size,
+                train=False,
+                thermal_norm=thermal_norm,
+                thermal_mu=thermal_mu_es,
+                thermal_sigma=thermal_sig_es,
+                balanced_thermal_aug=False,
+            ),
             shuffle=False,
             **loader_common,
         )
@@ -632,6 +758,7 @@ def train_one_run(
         class_weights,
         device,
         focal_gamma=focal_gamma,
+        label_smoothing=float(label_smoothing or 0.05),
         class_counts=class_counts,
         manual_class_gain=(nw, fw),
     )
@@ -649,7 +776,13 @@ def train_one_run(
     })
 
     wd = float(TRAIN_DEFAULT.get("weight_decay", 0.01))
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+    frz_rgb = int(max(0, int(freeze_rgb_epochs)))
+    if frz_rgb > 0 and _is_fusion_dual_family(mf):
+        _set_rgb_encoder_trainable(model, False)
+        print(f"[train] freeze_rgb_epochs={frz_rgb} (RGB encoder frozen initially)")
+    opt = build_optimizer_with_thermal_multiplier(
+        model, mf=mf, lr=float(lr), weight_decay=wd, thermal_lr_mult=float(thermal_lr_mult)
+    )
     if scheduler_kind == "cosine":
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
     else:
@@ -667,6 +800,7 @@ def train_one_run(
     os.makedirs(os.path.dirname(out_ckpt) or ".", exist_ok=True)
     # Tracks the best validation selection score (legacy or realistic, see sel_norm).
     best_val_score = -1.0
+    best_recall_fpr_key: tuple | None = None
     patience_counter = 0
 
     grad_accum_steps = max(1, int(grad_accum_steps))
@@ -674,6 +808,25 @@ def train_one_run(
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     for ep in range(1, epochs + 1):
+        if frz_rgb > 0 and ep == frz_rgb + 1 and _is_fusion_dual_family(mf):
+            print("[train] unfreezing RGB encoder — rebuilding optimizer + scheduler")
+            _set_rgb_encoder_trainable(model, True)
+            opt = build_optimizer_with_thermal_multiplier(
+                model,
+                mf=mf,
+                lr=float(lr),
+                weight_decay=wd,
+                thermal_lr_mult=float(thermal_lr_mult),
+            )
+            if scheduler_kind == "cosine":
+                sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    opt, T_max=max(int(epochs) - int(ep) + 1, 1)
+                )
+            else:
+                sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    opt, mode="max", factor=0.5, patience=2
+                )
+
         model.train()
         pbar = tqdm(train_loader, desc=f"{mode} ep{ep}/{epochs}")
         opt.zero_grad(set_to_none=True)
@@ -821,6 +974,22 @@ def train_one_run(
         )
         print("Val CM [[TN FP],[FN TP]]:\n", vm["cm"])
 
+        if mf == "dual_branch_gated_fusion" and mode == "fusion":
+            try:
+                model.eval()
+                xg, _ = next(iter(val_loader))
+                nb = bool(loader_common.get("pin_memory", False)) and device == "cuda"
+                xg = xg.to(device, non_blocking=nb)[: min(24, len(xg))]
+                with torch.no_grad():
+                    logits_g, aux_g = model(xg, return_aux=True)
+                del logits_g
+                if isinstance(aux_g, dict) and "gate_rgb" in aux_g:
+                    gr = float(aux_g["gate_rgb"].mean().detach().cpu())
+                    gt = float(aux_g["gate_thermal"].mean().detach().cpu())
+                    print(f"[val] gated fusion mean gates (mini-batch): RGB={gr:.4f} TH={gt:.4f}")
+            except Exception as eg:
+                print(f"[val] gated diagnostics skipped: {type(eg).__name__}: {eg}")
+
         # Per-source validation metrics
         per_source: dict[str, dict] = {}
         if "source" in va_eval.columns:
@@ -965,13 +1134,28 @@ def train_one_run(
 
         score_legacy = 0.5 * float(vm.get("f1", 0.0)) + 0.5 * float(vm.get("bal_acc", 0.0))
         score_realistic = realistic_selection_score(vm)
-        selection_score = score_realistic if sel_norm == "realistic" else score_legacy
+        key_recall_fpr = recall_fpr_selection_key(vm) if sel_norm == "recall_fpr" else None
+        if sel_norm == "realistic":
+            selection_score = score_realistic
+        elif sel_norm == "recall_fpr" and key_recall_fpr is not None:
+            selection_score = float(key_recall_fpr[1])
+        else:
+            selection_score = score_legacy
 
-        # Checkpoint selection metric. Both scores are computed at the val operating threshold:
-        #   - legacy   = 0.5 * F1 + 0.5 * BalAcc           (default, --selection_metric f1_balacc)
-        #   - realistic = F1 + BalAcc + AP - 0.5 * FPR     (--selection_metric realistic)
-        if selection_score == selection_score and selection_score > best_val_score:
-            best_val_score = float(selection_score)
+        # Checkpoint selection: f1_balacc | realistic | recall_fpr (prefer recall>=0.98, min FPR)
+        if sel_norm == "recall_fpr":
+            improved = key_recall_fpr is not None and (
+                best_recall_fpr_key is None or key_recall_fpr > best_recall_fpr_key
+            )
+        else:
+            improved = selection_score == selection_score and selection_score > best_val_score
+
+        if improved:
+            if sel_norm == "recall_fpr" and key_recall_fpr is not None:
+                best_recall_fpr_key = key_recall_fpr
+                best_val_score = float(key_recall_fpr[1])
+            elif sel_norm != "recall_fpr":
+                best_val_score = float(selection_score)
             patience_counter = 0
             thr_alarm_raw = _best_threshold_mode(vy, vp, "alarm")
             # Precision-biased (review) threshold is never clamped — keep strict.
@@ -1096,6 +1280,11 @@ def train_one_run(
                         "fire_weight": float(fw),
                         "training_class_balance": training_class_balance,
                         "selection_metric": str(sel_norm),
+                        "thermal_init": str(thermal_init),
+                        "freeze_rgb_epochs": int(frz_rgb),
+                        "thermal_lr_mult": float(thermal_lr_mult),
+                        "modal_dropout_p": float(modal_dropout_p),
+                        "thermal_norm": str(thermal_norm),
                     },
                     "state": model.state_dict(),
                     # Default inference threshold (operating point) and analysis threshold (F1-optimal)
@@ -1111,6 +1300,9 @@ def train_one_run(
                     "val_score_f1_balacc": float(score_legacy),
                     "val_score_realistic": float(score_realistic),
                     "val_selection_score": float(selection_score),
+                    "val_best_recall_fpr_key": (
+                        list(best_recall_fpr_key) if best_recall_fpr_key is not None else None
+                    ),
                     "temperature": float(T),
                     "worst_source_by_fpr": worst_source_by_fpr,
                     "worst_source_by_recall": worst_source_by_recall,
@@ -1283,5 +1475,53 @@ def train_one_run(
                 )
     except Exception as e:
         print(f"[final] threshold comparison skipped: {type(e).__name__}: {e}")
+
+    if experiment_log_csv:
+        mp = Path(OUTPUTS_DIR) / f"metrics_{mode}_{mf}.json"
+        row: dict = {
+            "ts_done": datetime.now(timezone.utc).isoformat(),
+            "experiment_name": (experiment_name or "").strip(),
+            "csv_index": str(csv_path),
+            "model_family": mf,
+            "mode": mode,
+            "backbone": str(backbone),
+            "thermal_norm": str(thermal_norm),
+            "thermal_init": str(thermal_init),
+            "freeze_rgb_epochs": int(frz_rgb),
+            "thermal_lr_mult": float(thermal_lr_mult),
+            "modal_dropout_p": float(modal_dropout_p),
+            "selection_metric": str(sel_norm),
+            "loss_name": str(ln),
+            "out_ckpt": str(out_ckpt),
+        }
+        try:
+            if mp.exists():
+                lastm = json.loads(mp.read_text(encoding="utf-8"))
+                for split in ("val", "test"):
+                    if isinstance(lastm.get(split), dict):
+                        p = lastm[split]
+                        for k in (
+                            "acc",
+                            "bal_acc",
+                            "precision",
+                            "recall",
+                            "f1",
+                            "specificity",
+                            "false_positive_rate",
+                            "auc",
+                            "ap",
+                        ):
+                            if k in p:
+                                val = p[k]
+                                row[f"{split}_{k}"] = float(val) if not isinstance(val, (list, dict)) else json.dumps(val)
+                        if "cm" in p:
+                            row[f"{split}_cm"] = json.dumps(sanitize_for_json(p["cm"]))
+                row["threshold_saved"] = float(lastm.get("threshold", float("nan")))
+                row["worst_source_fpr"] = lastm.get("worst_source_by_fpr")
+                row["worst_source_recall"] = lastm.get("worst_source_by_recall")
+            append_experiment_csv_row(str(experiment_log_csv), row)
+            print(f"[train] experiment log -> {experiment_log_csv}")
+        except Exception as ex:
+            print(f"[train] experiment_log_csv failed: {type(ex).__name__}: {ex}")
 
     return out_ckpt

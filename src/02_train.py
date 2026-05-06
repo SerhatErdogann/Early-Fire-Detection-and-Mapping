@@ -33,7 +33,15 @@ def main():
     ap.add_argument("--mode", choices=["rgb", "thermal", "fusion", "all"], default="all")
     ap.add_argument(
         "--model_family",
-        choices=["rgb_baseline", "thermal_baseline", "early_fusion", "dual_branch_fusion"],
+        choices=[
+            "rgb_baseline",
+            "thermal_baseline",
+            "early_fusion",
+            "dual_branch_fusion",
+            "dual_branch_gated_fusion",
+            "dual_branch_attention_fusion",
+            "dual_branch_mid_fusion",
+        ],
         default=None,
         help="If set, overrides per-mode default (use with single --mode)",
     )
@@ -76,7 +84,10 @@ def main():
     ap.add_argument(
         "--thermal_norm",
         default="",
-        help="Thermal normalization: percentile|minmax|uint16_div (empty=default)",
+        help=(
+            "Thermal normalization: percentile (default) | minmax | uint16_div | "
+            "train_zscore (μ,σ from TRAIN rows, z→[0,1])"
+        ),
     )
     ap.add_argument(
         "--no_fire_weight",
@@ -104,9 +115,12 @@ def main():
     )
     ap.add_argument(
         "--selection_metric",
-        choices=["f1_balacc", "realistic"],
+        choices=["f1_balacc", "realistic", "recall_fpr"],
         default="f1_balacc",
-        help="Checkpoint selection: legacy 0.5*f1+0.5*bal_acc vs realistic f1+bal_acc-0.5*fpr (val @ op thr).",
+        help=(
+            "Checkpoint selection on val @ operating thr: f1_balacc, realistic, "
+            "or recall_fpr (prioritise recall>=0.98 then min FPR)."
+        ),
     )
     ap.add_argument(
         "--source_weights",
@@ -124,6 +138,46 @@ def main():
             "Fusion-only modal dropout probability per batch. With prob p we zero "
             "either RGB (channels 0:3) or thermal (channel 3). 0.10 recommended."
         ),
+    )
+    ap.add_argument(
+        "--thermal_init",
+        default="mean_rgb",
+        help=(
+            "Thermal stem init for dual-branch families: mean_rgb | red | green | blue | kaiming."
+        ),
+    )
+    ap.add_argument(
+        "--freeze_rgb_epochs",
+        type=int,
+        default=0,
+        help="Dual-branch only: freeze RGB encoder for the first N epochs (thermal warms up).",
+    )
+    ap.add_argument(
+        "--thermal_lr_mult",
+        type=float,
+        default=1.0,
+        help="Dual-branch only: multiply learning rate for thermal encoder params.",
+    )
+    ap.add_argument(
+        "--label_smoothing",
+        type=float,
+        default=0.05,
+        help="Used when --loss_name label_smoothing_ce (or passed to focal CE weighting).",
+    )
+    ap.add_argument(
+        "--no_balanced_thermal_aug",
+        action="store_true",
+        help="Disable extra thermal-only photometric/blur/erase/noise aug (train fusion/thermal).",
+    )
+    ap.add_argument(
+        "--experiment_log_csv",
+        default="",
+        help="Append one summary row per finished run (e.g. outputs/improve_results.csv).",
+    )
+    ap.add_argument(
+        "--experiment_name",
+        default="",
+        help="Tag column for experiment_log_csv rows.",
     )
     args = ap.parse_args()
 
@@ -148,7 +202,8 @@ def main():
 
     def family_for_mode(m: str) -> str:
         if args.model_family:
-            if args.model_family == "dual_branch_fusion" and m != "fusion":
+            mf0 = args.model_family
+            if mf0.startswith("dual_branch_") and m != "fusion":
                 return "rgb_baseline" if m == "rgb" else "thermal_baseline"
             return args.model_family
         if m == "rgb":
@@ -169,7 +224,7 @@ def main():
         # efficientnet_b0 for a stronger baseline.
         if args.backbone is not None:
             backbone = str(args.backbone)
-        elif is_fusion and mf == "dual_branch_fusion":
+        elif is_fusion and str(mf).startswith("dual_branch_"):
             backbone = str(fd.get("dual_branch_backbone", "resnet50"))
         elif is_fusion:
             backbone = str(fd.get("backbone", "efficientnet_b0"))
@@ -190,7 +245,7 @@ def main():
         mf = family_for_mode(m)
         resolved = resolve_defaults(m, mf)
         out = ckpts[m]
-        if mf == "dual_branch_fusion":
+        if str(mf).startswith("dual_branch_"):
             out = str(CKPT_DUAL_BRANCH)
         print(
             f"[02_train] mode={m} family={mf} backbone={resolved['backbone']} "
@@ -235,6 +290,13 @@ def main():
             selection_metric=str(args.selection_metric),
             source_weights=str(args.source_weights),
             modal_dropout_p=float(args.modal_dropout_p),
+            thermal_init=str(args.thermal_init),
+            freeze_rgb_epochs=int(args.freeze_rgb_epochs),
+            thermal_lr_mult=float(args.thermal_lr_mult),
+            label_smoothing=float(args.label_smoothing),
+            balanced_thermal_aug=not bool(args.no_balanced_thermal_aug),
+            experiment_log_csv=(str(args.experiment_log_csv).strip() or None),
+            experiment_name=(str(args.experiment_name).strip() or None),
         )
 
 

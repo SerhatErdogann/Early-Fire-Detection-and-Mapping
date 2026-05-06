@@ -56,6 +56,42 @@ def _maybe_thermal_noise(th_arr01: np.ndarray, sigma: float = 0.02, p: float = 0
     return np.clip(th_arr01 + noise, 0.0, 1.0).astype(np.float32)
 
 
+def _augment_thermal_pil_L(
+    img: Image.Image,
+    brightness: float = 0.35,
+    contrast: float = 0.35,
+    p_jitter: float = 0.85,
+    p_blur: float = 0.25,
+) -> Image.Image:
+    """Train-only photometric jitter + occasional blur on single-channel PIL (no geometry)."""
+    if torch.rand(()).item() < p_jitter and brightness > 0:
+        f = 1.0 + (torch.rand(()).item() * 2.0 - 1.0) * float(brightness)
+        img = ImageEnhance.Brightness(img).enhance(max(0.0, f))
+    if torch.rand(()).item() < p_jitter and contrast > 0:
+        f = 1.0 + (torch.rand(()).item() * 2.0 - 1.0) * float(contrast)
+        img = ImageEnhance.Contrast(img).enhance(max(0.0, f))
+    if torch.rand(()).item() < p_blur:
+        radius = float(0.15 + torch.rand(()).item() * 1.2)
+        img = img.filter(ImageFilter.GaussianBlur(radius=radius))
+    return img
+
+
+def _maybe_random_erase_thermal_hw(th_hw01: np.ndarray, p: float = 0.2) -> np.ndarray:
+    """Random erasing on 2D thermal [0,1] array (square patch). Train-only."""
+    if th_hw01.ndim != 2 or torch.rand(()).item() >= p:
+        return th_hw01
+    h, w = th_hw01.shape
+    eh = int(h * (0.04 + torch.rand(()).item() * 0.18))
+    ew = int(w * (0.04 + torch.rand(()).item() * 0.18))
+    if eh < 1 or ew < 1 or eh >= h or ew >= w:
+        return th_hw01
+    i = int(torch.randint(0, h - eh + 1, (1,)).item())
+    j = int(torch.randint(0, w - ew + 1, (1,)).item())
+    out = th_hw01.astype(np.float32, copy=True)
+    out[i : i + eh, j : j + ew] = 0.0
+    return out
+
+
 def _hflip_pil(img: Image.Image) -> Image.Image:
     return img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
 
@@ -236,12 +272,26 @@ class FlameDataset(Dataset):
         size: int = 384,
         train: bool = False,
         thermal_norm: str = "percentile",
+        thermal_mu: float | None = None,
+        thermal_sigma: float | None = None,
+        balanced_thermal_aug: bool = True,
     ):
         self.df = df.reset_index(drop=True).copy()
         self.mode = (mode or "fusion").lower()
         self.size = int(size)
         self.train = bool(train)
         self.thermal_norm = str(thermal_norm or "percentile")
+        self.thermal_mu = float(thermal_mu) if thermal_mu is not None else None
+        self.thermal_sigma = float(thermal_sigma) if thermal_sigma is not None else None
+        self.balanced_thermal_aug = bool(balanced_thermal_aug)
+
+        norm_l = self.thermal_norm.lower()
+        if norm_l in ("train_zscore", "global_zscore"):
+            if self.thermal_mu is None or self.thermal_sigma is None:
+                raise ValueError(
+                    "thermal_norm=train_zscore requires thermal_mu and thermal_sigma "
+                    "(compute on training split)."
+                )
 
         if "label_fire" in self.df.columns:
             self.labels = pd.to_numeric(self.df["label_fire"], errors="coerce").fillna(0).astype(int).to_numpy()
@@ -273,8 +323,15 @@ class FlameDataset(Dataset):
                 raise ValueError("Thermal path column missing (expected path_th or path_thermal).")
             th_path = str(r[self.th_col])
             th_raw, kind = read_thermal_raw(th_path)
-            # Normalize thermal -> uint8 for sync geom augs (keeps pairing correct).
-            th_norm = thermal_to_norm01(th_raw, kind=kind, norm=self.thermal_norm)
+            norm_l = self.thermal_norm.lower()
+            if norm_l in ("train_zscore", "global_zscore"):
+                from .thermal_stats import thermal_global_zscore_to_01
+
+                th_norm = thermal_global_zscore_to_01(
+                    th_raw, float(self.thermal_mu or 0.0), float(self.thermal_sigma or 1.0)
+                )
+            else:
+                th_norm = thermal_to_norm01(th_raw, kind=kind, norm=self.thermal_norm)
             th_norm = _thermal_norm_to_gray2d(th_norm)
             th_u8 = (np.clip(th_norm, 0, 1) * 255).astype(np.uint8)
             th_pil = Image.fromarray(th_u8, mode="L")
@@ -284,19 +341,21 @@ class FlameDataset(Dataset):
             th_pil = _resize_pil(th_pil, self.size)
             if self.train:
                 rgb_pil, th_pil = _sync_geom_aug(rgb_pil, th_pil, self.size)
-                # RGB-only photometric perturbations: do NOT touch thermal.
                 if self.mode == "fusion":
                     rgb_pil = _augment_rgb_pil(rgb_pil)
+                if self.mode in ("fusion", "thermal") and self.balanced_thermal_aug:
+                    th_pil = _augment_thermal_pil_L(th_pil)
 
             rgb = _to_chw01_rgb(rgb_pil)
             th_arr = (np.asarray(th_pil).astype(np.float32) / 255.0)
             if self.train:
-                # RGB random erasing applied AFTER geometry, only for fusion;
-                # thermal stays clean to preserve modality consistency.
                 if self.mode == "fusion":
                     rgb = _maybe_random_erase_chw(rgb)
-                # Light Gaussian noise on thermal map only.
-                th_arr = _maybe_thermal_noise(th_arr, sigma=0.02)
+                if self.mode in ("fusion", "thermal"):
+                    th_arr = _maybe_thermal_noise(th_arr, sigma=0.02, p=0.5)
+                if self.mode in ("fusion", "thermal") and self.balanced_thermal_aug:
+                    th_arr = _maybe_random_erase_thermal_hw(th_arr, p=0.22)
+                    th_arr = _maybe_thermal_noise(th_arr, sigma=0.03, p=0.55)
             th = _to_1hw01(th_arr)
             if self.mode == "thermal":
                 x = th
