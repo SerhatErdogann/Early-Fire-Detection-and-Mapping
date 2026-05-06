@@ -38,6 +38,9 @@ FLAME_INDEX_CSV = _path_from_env("FLAME_INDEX_CSV", OUTPUTS_DIR / "flame_index.c
 MASTER_INDEX_PARQUET = _path_from_env("FLAME_MASTER_INDEX", DATA_ROOT / "master_index.parquet")
 # Optional: extra roots to scan (e.g. extracted data.rar). Paths relative to cwd ok.
 CUSTOM_DATA_SCAN_ROOTS: list = []
+FLAME_EMBEDDED_BINARY = FLAME_ROOT / "binary"
+# Legacy RGBT CSV bundled under ``flame3/binary/`` (optional).
+FLAME_EMBEDDED_CSV = FLAME_EMBEDDED_BINARY / "rgbt_multimodal_data.csv"
 
 # Repo-level multimodal RGB+thermal binary dataset (preset train/val/test folders).
 BINARY_ROOT = _path_from_env("FLAME_BINARY_ROOT", DATA_ROOT / "binary")

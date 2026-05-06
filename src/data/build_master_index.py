@@ -10,6 +10,7 @@ import pandas as pd
 
 try:
     from config import (
+        FLAME_EMBEDDED_CSV,
         FLAME_INDEX_CSV,
         MASTER_INDEX_PARQUET,
         OUTPUTS_DIR,
@@ -24,6 +25,7 @@ except Exception:  # pragma: no cover
     OUTPUTS_DIR = Path("outputs")
     FLAME_INDEX_CSV = OUTPUTS_DIR / "flame_index.csv"
     MASTER_INDEX_PARQUET = Path("data/master_index.parquet")
+    FLAME_EMBEDDED_CSV = FLAME_ROOT / "binary" / "rgbt_multimodal_data.csv"
     FLAME_VIDEO_FRAMES_ROOT = Path("data/flame_video_frames")
     DATA_ROOT = Path("data")
 
@@ -121,12 +123,10 @@ _FRAME_TAIL_RE = re.compile(r"[-_]?\d+$")
 # into a single video and forbid any 3-way split. We mitigate real leakage by
 # (a) keeping consecutive frames in the same chunk and (b) inserting a small
 # frame gap at every chunk boundary (see ``_scan_pairs_two_trees``).
-_BLOCK_SPLIT_OPT_IN_SOURCES: set[str] = {"flame3", "flame3_raw_extra"}
+_BLOCK_SPLIT_OPT_IN_SOURCES: set[str] = {"flame3"}
 
 # Authoritative splits (never remapped by global rebalance fallback).
 _SPLIT_LOCKED_SOURCES = frozenset({"binary_root"})
-# Sources whose ``split`` is fixed at ingest (e.g. extra_test-only holdout).
-_SPLIT_PINNED_SPLITS_SOURCES = frozenset({"flame3_raw_extra"})
 
 
 def _infer_official_split_from_path(p: str) -> str | None:
@@ -454,8 +454,7 @@ def _scan_pairs_flame_root(flame_root: Path) -> list[dict]:
     - `No Fire/RGB/Corrected FOV/*` + `No Fire/Thermal/Celsius TIFF/*`
 
     Standalone multimodal BINARY (``BINARY_ROOT/train|val|test``) is indexed
-    separately. Raw RGB+thermal for ``extra_test`` only — see
-    :func:`_scan_flame3_raw_extra_root`. ``Dataset/`` here is RGB-only and is intentionally omitted.
+    separately. ``Dataset/`` here is RGB-only and is intentionally omitted.
     """
     rows: list[dict] = []
     if not flame_root.exists():
@@ -487,105 +486,6 @@ def _scan_pairs_flame_root(flame_root: Path) -> list[dict]:
         chunk_gap=2,
     )
 
-    return rows
-
-
-def _flame_raw_rgb_thermal_roots(cls_root: Path) -> tuple[Path | None, Path | None]:
-    """Find paired *raw-ish* RGB + thermal trees under ``Fire`` / ``No Fire``.
-
-    FLAME3 CV subset / pipeline çıktısında sık yapı::
-
-        RGB/Raw/*.jpg   <->   Thermal/JPG/*.jpg
-        veya aynı görüntü çifti ``Thermal/Raw JPG`` (boşluklu klasör adı) altında olabilir.
-
-    Stem eşleşmesi :func:`_scan_pairs_two_trees` ile yapılır (suffix strip).
-    Bazı paketlerde ``Thermal/Raw`` da kullanılabilir — ``RGB/Corrected FOV``
-    dahil etmiyoruz (``source=flame3`` ile çakışır).
-    """
-    cls_root = Path(cls_root)
-    # Explicit (rgb_parts, thermal_parts) relative to cls_root — order = preference.
-    spec: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
-        # Bundles that ship ``Thermal/Raw JPG`` (space) instead of ``Thermal/JPG``
-        (("RGB", "Raw"), ("Thermal", "Raw JPG")),
-        (("RGB", "Raw"), ("Thermal", "raw jpg")),
-        (("RGB", "raw"), ("Thermal", "Raw JPG")),
-        # Official FLAME3 CV / Raw File Sorting tool layout (IEEE DataPort, pipeline README)
-        (("RGB", "Raw"), ("Thermal", "JPG")),
-        (("RGB", "Raw"), ("Thermal", "jpg")),
-        (("RGB", "raw"), ("Thermal", "JPG")),
-        (("rgb", "raw"), ("thermal", "jpg")),
-        (("RGB", "RAW"), ("Thermal", "JPG")),
-        # Alternate thermal “raw” folder names
-        (("RGB", "Raw"), ("Thermal", "Raw")),
-        (("RGB", "raw"), ("Thermal", "raw")),
-        (("rgb", "raw"), ("thermal", "raw")),
-        (("RGB", "RAW"), ("Thermal", "RAW")),
-    ]
-    for rp, tp in spec:
-        rr = cls_root.joinpath(*rp)
-        tt = cls_root.joinpath(*tp)
-        if rr.is_dir() and tt.is_dir() and _files_by_stem(rr) and _files_by_stem(tt):
-            return rr, tt
-    return None, None
-
-
-def _flame_side_dir_hints(flame_root: Path, cls_name: str) -> str:
-    """One-line subdirectory names under ``{cls}/RGB`` and ``{cls}/Thermal`` for diagnostics."""
-    base = flame_root / cls_name
-    rgb_leaf, th_leaf = base / "RGB", base / "Thermal"
-
-    def _subs(d: Path) -> str:
-        if not d.is_dir():
-            return "missing"
-        try:
-            names = sorted(x.name for x in d.iterdir() if x.is_dir())
-            return "|".join(names) if names else "(files_only)"
-        except OSError:
-            return "?"
-
-    return f"{cls_name}:RGB[{_subs(rgb_leaf)}] Thermal[{_subs(th_leaf)}]"
-
-
-def _scan_flame3_raw_extra_root(flame_root: Path) -> list[dict]:
-    """FLAME3 Raw pairs; ``source=flame3_raw_extra``, ``split=extra_test`` (robustness holdout)."""
-    rows: list[dict] = []
-    if not flame_root.is_dir():
-        return rows
-
-    for cls_name, lab, prefix in (
-        ("Fire", 1, "flame3_raw_extra_fire"),
-        ("No Fire", 0, "flame3_raw_extra_nofire"),
-    ):
-        cls_root = flame_root / cls_name
-        if not cls_root.is_dir():
-            continue
-        rr, tt = _flame_raw_rgb_thermal_roots(cls_root)
-        if rr is None:
-            continue
-        chunk = _scan_pairs_two_trees(
-            rgb_root=rr,
-            th_root=tt,
-            label=lab,
-            source="flame3_raw_extra",
-            split_prefix=prefix,
-            chunk_size=20,
-            chunk_gap=2,
-        )
-        for r in chunk:
-            r["split"] = "extra_test"
-        rows.extend(chunk)
-    if not rows and flame_root.is_dir():
-        h = "; ".join(
-            _flame_side_dir_hints(flame_root, c) for c in ("Fire", "No Fire") if (flame_root / c).is_dir()
-        )
-        if h:
-            print(
-                f"[flame3_raw_extra] no pairs — dirs on disk ({h}). "
-                "Expect paired stems under ``RGB/Raw`` + ``Thermal/JPG``, ``Thermal/Raw JPG``, or ``Thermal/Raw``.",
-                flush=True,
-            )
-        else:
-            print("[flame3_raw_extra] no pairs — Fire/No Fire folders not found under flame root.", flush=True)
     return rows
 
 
@@ -936,6 +836,51 @@ def _scan_cart_pairs(cart_root: Path, max_cart_samples: int = 500) -> list[dict]
     return rows
 
 
+def _load_binary_csv(path: Path) -> pd.DataFrame | None:
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return None
+    # normalize expected column names
+    colmap = {}
+    for c in df.columns:
+        cl = c.lower()
+        if cl in ("rgb_path", "path_rgb", "rgb"):
+            colmap[c] = "path_rgb"
+        if cl in ("thermal_path", "path_th", "path_thermal", "thermal"):
+            colmap[c] = "path_th"
+        if cl in ("label", "y", "target", "fire"):
+            colmap[c] = "label"
+    if colmap:
+        df = df.rename(columns=colmap)
+    if "path_rgb" not in df.columns or "path_th" not in df.columns or "label" not in df.columns:
+        return None
+    df["label"] = pd.to_numeric(df["label"], errors="coerce").fillna(0).astype(int)
+    df["label_fire"] = df["label"].astype(int)
+    df["source"] = "binary"
+    # Use the parent-directory (typically the video/session id) as the group so
+    # frames from the same recording cannot be split across train/val/test.
+    def _video_id_from_path(p: str) -> str:
+        try:
+            parent = Path(str(p)).parent.name
+        except Exception:
+            parent = ""
+        parent = parent.lower()
+        for s in ("_rgb", "_thermal", "_w", "_t"):
+            if parent.endswith(s):
+                parent = parent[: -len(s)]
+                break
+        return parent or "binary"
+
+    stems = df["path_rgb"].astype(str).map(lambda x: Path(x).stem)
+    videos = df["path_rgb"].astype(str).map(_video_id_from_path)
+    df["key"] = "binary_" + videos.astype(str) + "_" + stems.astype(str)
+    df["split_group"] = "binary_" + videos.astype(str)
+    return df[["path_rgb", "path_th", "label", "label_fire", "source", "key", "split_group"]].copy()
+
+
 def _video_base_from_path(value: object) -> str:
     """Heuristic ``<full_parent_path>/<stem-without-trailing-digits>`` used to
     detect sequence-level leakage where two frames from the same recording end
@@ -1070,9 +1015,6 @@ def build_master_index(
     all_rows: list[dict] = []
     for root in roots:
         all_rows.extend(_scan_pairs_flame_root(root))
-        raw_x_rows = _scan_flame3_raw_extra_root(root)
-        print(f"[flame3_raw_extra] root={root} paired_rows={len(raw_x_rows)} split=extra_test", flush=True)
-        all_rows.extend(raw_x_rows)
 
     df = pd.DataFrame(all_rows)
 
@@ -1134,6 +1076,16 @@ def build_master_index(
             "prefer no_fire_weight in [1.0, 1.2] vs 2.0 when cart_aux rows are enabled.",
             flush=True,
         )
+
+    emb_csv_path = Path(FLAME_EMBEDDED_CSV).expanduser().resolve()
+    if emb_csv_path.exists():
+        print(f"[flame_binary_csv] root={emb_csv_path}", flush=True)
+        bin_df = _load_binary_csv(emb_csv_path)
+    else:
+        print(f"[flame_binary_csv] skipped: file not found ({emb_csv_path})", flush=True)
+        bin_df = None
+    if bin_df is not None and not bin_df.empty:
+        df = pd.concat([df, bin_df], ignore_index=True)
 
     if df.empty:
         raise SystemExit(
@@ -1203,7 +1155,7 @@ def build_master_index(
         df.loc[mv, "split_group"] = "flame_video_nofire_pair_" + pair_series.astype(str)
 
     # D) Rows without authoritative split (binary preset / cart train-only applied later cover most cases)
-    has_split_mask = df["split"].astype(str).str.strip().isin(["train", "val", "test", "extra_test"])
+    has_split_mask = df["split"].astype(str).str.strip().isin(["train", "val", "test"])
     remain_mask = ~has_split_mask
     if int(remain_mask.sum()):
         sub = df.loc[remain_mask].copy()
@@ -1230,7 +1182,7 @@ def build_master_index(
         return True
 
     if not _has_both_labels(df):
-        movable_mask = ~df["source"].astype(str).isin(_SPLIT_LOCKED_SOURCES | _SPLIT_PINNED_SPLITS_SOURCES).to_numpy()
+        movable_mask = ~df["source"].astype(str).isin(_SPLIT_LOCKED_SOURCES).to_numpy()
         if movable_mask.any():
             m_sub = df.loc[movable_mask].copy()
             m_sub["strat_key"] = m_sub["label"].astype(str) + "_" + m_sub["source"].astype(str)
@@ -1292,9 +1244,6 @@ def build_master_index(
     print("=== distinct split_group counts by source ===")
     grp_stats = df.groupby("source")["split_group"].nunique().sort_values(ascending=False)
     print(grp_stats.to_string())
-
-    n_extra_test = int((df["split"].astype(str).str.strip() == "extra_test").sum())
-    print(f"[index] extra_test total rows (all sources): {n_extra_test}", flush=True)
 
     _summarize_disk_paths_maybe_missing(df)
 

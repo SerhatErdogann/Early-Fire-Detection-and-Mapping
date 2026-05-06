@@ -21,8 +21,7 @@ def main() -> None:
     print("sources", sources)
 
     expected = {"binary_root", "flame3", "flame_video_nofire"}
-    known_optional = {"cart_aux", "flame3_raw_extra"}
-    extra = [s for s in sources if s not in expected and s not in known_optional]
+    extra = [s for s in sources if s not in expected]
     missing = [s for s in sorted(expected) if s not in sources]
     if extra:
         print("[warn] unexpected_sources", extra)

@@ -10,14 +10,12 @@ from sklearn.metrics import (
 )
 
 
-def eval_probs(model, loader, device, temperature=1.0, corrupt_batch=None):
+def eval_probs(model, loader, device, temperature=1.0):
     model.eval()
     ys, ps = [], []
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device)
-            if corrupt_batch is not None:
-                x = corrupt_batch(x)
             logits = model(x)
             logits_t = logits / max(1e-6, float(temperature))
             prob = torch.softmax(logits_t, dim=1)[:, 1].cpu().numpy()

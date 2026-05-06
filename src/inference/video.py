@@ -406,7 +406,11 @@ def run_video_inference(
             with torch.inference_mode():
                 x = _to_device_batch(x_np, device=device)
                 if amp_cuda:
-                    with torch.cuda.amp.autocast(dtype=torch.float16):
+                    try:
+                        autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.float16)
+                    except (TypeError, AttributeError):
+                        autocast_ctx = torch.cuda.amp.autocast(dtype=torch.float16)
+                    with autocast_ctx:
                         logits = model(x)
                         scores_cal = logits / max(1e-6, temperature)
                         prob_raw = torch.softmax(scores_cal, dim=1)[0, 1].item()

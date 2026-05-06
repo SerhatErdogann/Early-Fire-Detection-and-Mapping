@@ -35,12 +35,6 @@ from .metrics import (
     _best_threshold_mode,
 )
 from ..data import FlameDataset
-from .robustness_eval import (
-    augment_metrics_json_with_robustness_outputs,
-    flame3_eval_slice,
-    merge_robustness_into_metrics_json,
-    run_flame3_robustness_evaluation,
-)
 from .sequence_metrics import compute_sequence_alarm_summary
 from ..data.path_filter import filter_df_existing_paths
 from ..data.split import _group_split_three_way, split_train_val_extra
@@ -154,193 +148,29 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _slug_path(x: object) -> str:
-    return str(x).strip().replace("\\", "/").lower()
-
-
-def _hard_negative_hit_series(
-    tr: pd.DataFrame,
-    path_slugs: set[str] | None,
-    hard_keys: set[str] | None,
-) -> pd.Series:
-    """Boolean mask: row matches slug-normalized RGB/thermal paths and/or keys."""
+def _hard_negative_hits(tr: pd.DataFrame, hard_paths: set[str] | None, hard_keys: set[str] | None) -> pd.Series:
+    """Boolean mask aligned with ``tr`` rows: training rows matching hard-negative lists."""
     hits = pd.Series(False, index=tr.index)
-    if path_slugs:
+    if not hard_paths and not hard_keys:
+        return hits
+    if hard_paths:
         if "path_rgb" in tr.columns:
-            hits |= tr["path_rgb"].map(_slug_path).isin(path_slugs)
+            hits = hits | tr["path_rgb"].astype(str).isin(hard_paths)
         if "path_th" in tr.columns:
-            hits |= tr["path_th"].map(_slug_path).isin(path_slugs)
+            hits = hits | tr["path_th"].astype(str).isin(hard_paths)
     if hard_keys and "key" in tr.columns:
-        hits |= tr["key"].astype(str).isin(hard_keys)
+        hits = hits | tr["key"].astype(str).isin(hard_keys)
     return hits
 
 
-def _hard_negative_hits(tr: pd.DataFrame, hard_paths: set[str] | None, hard_keys: set[str] | None) -> pd.Series:
-    slugs = {_slug_path(p) for p in (hard_paths or set())}
-    return _hard_negative_hit_series(tr, slugs if slugs else None, hard_keys)
-
-
-def _extra_hard_negative_class0_indices(
-    tr: pd.DataFrame,
-    path_slugs: set[str] | None,
-    hard_keys: set[str] | None,
-    *,
-    hard_negative_weight: float = 2.0,
-) -> list[int]:
-    """Duplicate class-0 row indices so hard negatives appear proportionally more in balanced_sampler."""
-    if not path_slugs and not hard_keys:
+def _extra_hard_negative_class0_indices(tr: pd.DataFrame, hard_paths: set[str] | None, hard_keys: set[str] | None) -> list[int]:
+    """Duplicate row indices (for class-0 pool only) so hard-negative no_fire rows appear more often."""
+    if not hard_paths and not hard_keys:
         return []
-    hn = _hard_negative_hit_series(tr, path_slugs, hard_keys)
+    hn = _hard_negative_hits(tr, hard_paths, hard_keys)
     lab = tr["label"].astype(int).to_numpy()
     m = hn.to_numpy(dtype=bool) & (lab == 0)
-    base = np.flatnonzero(m).astype(np.int64).tolist()
-    if not base:
-        return []
-    nw = max(1.0, float(hard_negative_weight))
-    n_extra = max(0, int(round(nw)) - 1)
-    out: list[int] = []
-    for i in base:
-        out.extend([int(i)] * n_extra)
-    return out
-
-
-def _apply_hard_negative_csv_enrichment(
-    hard_negative_csv: str | None,
-    tr: pd.DataFrame,
-    extra_test_df: pd.DataFrame,
-    *,
-    mode: str,
-    hard_negative_weight: float,
-) -> tuple[pd.DataFrame, pd.DataFrame, set[str], set[str], dict[str, int]]:
-    """Match/inject CSV hard negatives into ``tr`` and drop overlapping rows from ``extra_test``."""
-    empty_stats = {"loaded": 0, "matched": 0, "injected": 0, "excluded_extra": 0}
-    if not hard_negative_csv or not Path(hard_negative_csv).is_file():
-        return tr, extra_test_df, set(), set(), empty_stats
-
-    try:
-        hdf = pd.read_csv(hard_negative_csv)
-    except Exception:
-        print(f"[hard-negative] unreadable CSV {hard_negative_csv!r}; skip", flush=True)
-        return tr, extra_test_df, set(), set(), empty_stats
-
-    n_csv = len(hdf)
-    ex_slug: set[str] = set()
-    ex_keys: set[str] = set()
-    for _, r in hdf.iterrows():
-        if "path_rgb" in hdf.columns:
-            v = str(r.get("path_rgb", "")).strip()
-            if v and v.lower() != "nan":
-                ex_slug.add(_slug_path(v))
-        if "path_th" in hdf.columns:
-            v = str(r.get("path_th", "")).strip()
-            if v and v.lower() != "nan":
-                ex_slug.add(_slug_path(v))
-        if "key" in hdf.columns:
-            k = str(r.get("key", "")).strip()
-            if k and k.lower() != "nan":
-                ex_keys.add(k)
-
-    excluded_extra = 0
-    if len(extra_test_df) > 0 and (ex_slug or ex_keys):
-        bad = pd.Series(False, index=extra_test_df.index)
-        if "path_rgb" in extra_test_df.columns and ex_slug:
-            bad |= extra_test_df["path_rgb"].map(_slug_path).isin(ex_slug)
-        if "path_th" in extra_test_df.columns and ex_slug:
-            bad |= extra_test_df["path_th"].map(_slug_path).isin(ex_slug)
-        if "key" in extra_test_df.columns and ex_keys:
-            bad |= extra_test_df["key"].astype(str).isin(ex_keys)
-        excluded_extra = int(bad.sum())
-        extra_out = extra_test_df.loc[~bad.to_numpy()].reset_index(drop=True)
-        if excluded_extra > 0:
-            print(
-                f"[extra_test] excluded {excluded_extra} hard-negative training rows from evaluation",
-                flush=True,
-            )
-    else:
-        extra_out = extra_test_df
-
-    tr_rows = tr.reset_index(drop=True).copy()
-    tr_slug_rgb = set(tr_rows["path_rgb"].map(_slug_path)) if "path_rgb" in tr_rows.columns else set()
-    tr_slug_th = set(tr_rows["path_th"].map(_slug_path)) if "path_th" in tr_rows.columns else set()
-    tr_keys = set(tr_rows["key"].astype(str).tolist()) if "key" in tr_rows.columns else set()
-
-    matched_csv = 0
-    injected_rows: list[dict] = []
-    hn_w = float(hard_negative_weight)
-
-    for _, r in hdf.iterrows():
-        key_csv = ""
-        if "key" in hdf.columns:
-            kk = str(r.get("key", "")).strip()
-            if kk and kk.lower() != "nan":
-                key_csv = kk
-
-        matched_row = bool(key_csv and key_csv in tr_keys)
-        pr_raw = ""
-        pt_raw = ""
-        if "path_rgb" in hdf.columns:
-            pr_raw = str(r.get("path_rgb", "")).strip()
-            if pr_raw.lower() == "nan":
-                pr_raw = ""
-        if "path_th" in hdf.columns:
-            pt_raw = str(r.get("path_th", "")).strip()
-            if pt_raw.lower() == "nan":
-                pt_raw = ""
-
-        srg = _slug_path(pr_raw) if pr_raw else ""
-        stg = _slug_path(pt_raw) if pt_raw else ""
-        if not matched_row and srg and srg in tr_slug_rgb:
-            matched_row = True
-        if not matched_row and stg and stg in tr_slug_th:
-            matched_row = True
-
-        if matched_row:
-            matched_csv += 1
-            continue
-
-        if mode != "fusion" or not pr_raw or not pt_raw:
-            continue
-        p_r = Path(pr_raw.replace("\\", "/"))
-        p_t = Path(pt_raw.replace("\\", "/"))
-        if not p_r.is_file() or not p_t.is_file():
-            continue
-        if srg in tr_slug_rgb or stg in tr_slug_th:
-            continue
-
-        nk = key_csv if key_csv else f"extra_hard_negative_{srg}_{stg}"[:260]
-        if nk in tr_keys:
-            nk = nk + "__inj"
-        sg = ("extra_hard_negative_" + (key_csv[:48] if key_csv else srg[-32:])).strip("_")
-
-        injected_rows.append(
-            {
-                "path_rgb": str(p_r),
-                "path_th": str(p_t),
-                "label": 0,
-                "label_fire": 0,
-                "source": "extra_hard_negative",
-                "split": "train",
-                "key": nk,
-                "split_group": sg,
-                "used_for_hard_negative_training": True,
-                "sampling_weight": hn_w,
-            }
-        )
-        tr_slug_rgb.add(srg)
-        tr_slug_th.add(stg)
-        tr_keys.add(nk)
-
-    k_inj = len(injected_rows)
-    if injected_rows:
-        tr_rows = pd.concat([tr_rows, pd.DataFrame(injected_rows)], ignore_index=True)
-
-    print(f"[hard-negative] loaded {n_csv} rows", flush=True)
-    print(f"[hard-negative] matched {matched_csv} existing rows", flush=True)
-    print(f"[hard-negative] injected {k_inj} rows", flush=True)
-    print(f"[hard-negative] weight={float(hard_negative_weight)}", flush=True)
-
-    stats = {"loaded": n_csv, "matched": matched_csv, "injected": k_inj, "excluded_extra": excluded_extra}
-    return tr_rows, extra_out, set(ex_slug), set(ex_keys), stats
+    return np.flatnonzero(m).astype(np.int64).tolist()
 
 
 def _label_counts_dict(d: pd.DataFrame) -> dict:
@@ -434,10 +264,6 @@ def _split_data(
     """
     Scene/group-level split on ``split_group``. ``extra`` (drone no-fire) uses group holdout.
     All non-extra rows (flame3, binary, custom) share one group split so binary is included in train/val/test.
-
-    When the index has column ``split``, rows with ``train`` / ``val`` / ``test`` / ``extra_test`` are routed
-    accordingly; ``extra_test`` is held out (used for ``extra_test_df`` and optional robustness slices).
-    Rows with any other normalized split value raise ``ValueError``.
     """
     rng = np.random.default_rng(random_state)
     df = _prepare_df(df)
@@ -445,26 +271,15 @@ def _split_data(
     # If master index already provides an explicit split, respect it.
     if "split" in df.columns:
         sp = df["split"].astype(str).str.lower().str.strip()
-        ok = sp.isin(["train", "val", "test", "extra_test"])
+        ok = sp.isin(["train", "val", "test"])
         if int(ok.sum()) > 0:
             df2 = df.copy()
             df2["split"] = sp.where(ok, "")
             tr = df2[df2["split"] == "train"].copy()
             va = df2[df2["split"] == "val"].copy()
-            test_df = df2[df2["split"] == "test"].copy()
-            extra_test_df = df2[df2["split"] == "extra_test"].copy()
-            orphaned = df2[~df2["split"].isin(["train", "val", "test", "extra_test"])]
-            if len(orphaned) > 0:
-                raise ValueError(
-                    f"[train] {len(orphaned)} rows have split not in train|val|test|extra_test (after normalizing authoritative splits). "
-                    "Fix master_index or filtering."
-                )
-            return (
-                tr.reset_index(drop=True),
-                va.reset_index(drop=True),
-                test_df.reset_index(drop=True),
-                extra_test_df.reset_index(drop=True),
-            )
+            te = df2[df2["split"] == "test"].copy()
+            extra_test_df = df2.iloc[0:0].copy()
+            return tr.reset_index(drop=True), va.reset_index(drop=True), te.reset_index(drop=True), extra_test_df
 
     df_main, extra_test_df = split_train_val_extra(df, extra_test_ratio=extra_test_ratio, random_state=random_state)
     main_non_extra = df_main[df_main["source"] != "extra"].copy()
@@ -500,11 +315,9 @@ def _parse_source_weights(s: str | None) -> dict[str, float]:
 def _sample_weights(
     tr: pd.DataFrame,
     loss_mode: str,
-    hard_path_slugs: set[str] | None,
+    hard_paths: set[str] | None,
     hard_keys: set[str] | None = None,
     source_weights_overrides: dict[str, float] | None = None,
-    *,
-    hard_negative_weight: float = 2.0,
 ) -> np.ndarray | None:
     skip_weighted = loss_mode in ("balanced_sampler",)
     use_sampler = (
@@ -520,16 +333,12 @@ def _sample_weights(
     if "label_quality" in tr.columns:
         qmap = {"gold": 1.0, "silver": 0.85, "weak": 0.65}
         sw = sw * tr["label_quality"].map(qmap).fillna(0.75).astype(np.float64)
-    # Hard-negative upweight (sampler modes only; balanced_sampler uses duplicate indices)
-    if hard_path_slugs or hard_keys:
-        hits_arr = _hard_negative_hit_series(tr, hard_path_slugs, hard_keys)
-        sw = sw * np.where(
-            hits_arr.to_numpy(dtype=bool),
-            np.float64(max(1.0, float(hard_negative_weight))),
-            np.float64(1.0),
-        )
+    # Hard-negative upweight (same semantics as before; complements extra draws in balanced_sampler)
+    if hard_paths or hard_keys:
+        hits = _hard_negative_hits(tr, hard_paths, hard_keys)
+        sw = sw * (1.0 + 2.0 * hits.astype(np.float64))
         with contextlib.suppress(Exception):
-            print(f"[train] hard_negative upweight matched rows: {int(hits_arr.sum())}/{len(tr)}")
+            print(f"[train] hard_negative upweight matched rows: {int(hits.sum())}/{len(tr)}")
     # Source-aware sampling (multiplies class-balance weights)
     if "source" in tr.columns:
         src = tr["source"].astype(str)
@@ -540,7 +349,6 @@ def _sample_weights(
             # CART is auxiliary ground-domain negatives; downweight by default
             # so it does not dominate the no_fire pool of every batch.
             "cart_aux": 0.5,
-            "extra_hard_negative": 1.0,
         }
         if source_weights_overrides:
             for k, v in source_weights_overrides.items():
@@ -593,9 +401,6 @@ def train_one_run(
     selection_metric: str = "f1_balacc",
     source_weights: str | dict | None = None,
     modal_dropout_p: float = 0.0,
-    robustness_eval: bool = False,
-    hard_negative_weight: float = 2.0,
-    aug_strength: str = "default",
 ):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     use_cuda = torch.cuda.is_available()
@@ -627,14 +432,6 @@ def train_one_run(
     va = va.reset_index(drop=True)
     test_df = test_df.reset_index(drop=True)
     extra_test_df = extra_test_df.reset_index(drop=True)
-
-    tr, extra_test_df, path_slug_hn, keys_hn, _hn_dbg = _apply_hard_negative_csv_enrichment(
-        hard_negative_csv,
-        tr,
-        extra_test_df,
-        mode=mode,
-        hard_negative_weight=float(hard_negative_weight),
-    )
 
     print(f"\n[{mode}/{mf}] train={len(tr)} | val={len(va)} | test={len(test_df)} | extra_test={len(extra_test_df)}")
     label_train = _label_counts_dict(tr)
@@ -696,6 +493,25 @@ def train_one_run(
         except Exception:
             pass
 
+    hard_paths: set[str] | None = None
+    hard_keys: set[str] | None = None
+    if hard_negative_csv and Path(hard_negative_csv).exists():
+        hdf = pd.read_csv(hard_negative_csv)
+        hp: set[str] = set()
+        if "path_rgb" in hdf.columns:
+            hp |= set(hdf["path_rgb"].astype(str).tolist())
+        if "path_th" in hdf.columns:
+            hp |= set(hdf["path_th"].astype(str).tolist())
+        if not hp and len(hdf.columns) > 0:
+            hp |= set(hdf[hdf.columns[0]].astype(str).tolist())
+        hard_paths = hp or None
+        if "key" in hdf.columns:
+            hard_keys = set(hdf["key"].astype(str).tolist()) or None
+        print(
+            f"[train] hard_negative_csv: paths={len(hard_paths) if hard_paths else 0} "
+            f"keys={len(hard_keys) if hard_keys else 0}"
+        )
+
     in_ch, _ = get_model_config(mode)
     model = make_classifier(mf, backbone, mode, num_classes=2, pretrained=True).to(device)
     trainable_params = sum(int(p.numel()) for p in model.parameters() if p.requires_grad)
@@ -710,10 +526,9 @@ def train_one_run(
     sw_arr = _sample_weights(
         tr,
         loss_mode,
-        path_slug_hn if path_slug_hn else None,
-        hard_keys=keys_hn if keys_hn else None,
+        hard_paths,
+        hard_keys=hard_keys,
         source_weights_overrides=src_w_overrides,
-        hard_negative_weight=float(hard_negative_weight),
     )
     sampler = (
         WeightedRandomSampler(
@@ -755,23 +570,9 @@ def train_one_run(
     eff_bs = int(bs) * max(1, int(grad_accum_steps))
     print(f"[train] effective_batch_size={eff_bs} (bs={int(bs)} x grad_accum_steps={int(max(1, grad_accum_steps))})")
 
-    aug_str_norm = str(aug_strength or "default").strip().lower()
-    print(f"[train] aug_strength={aug_str_norm}")
-    train_ds = FlameDataset(
-        tr,
-        mode=mode,
-        size=size,
-        train=True,
-        thermal_norm=thermal_norm,
-        aug_strength=aug_str_norm,
-    )
+    train_ds = FlameDataset(tr, mode=mode, size=size, train=True, thermal_norm=thermal_norm)
     if loss_mode == "balanced_sampler":
-        extra0 = _extra_hard_negative_class0_indices(
-            tr,
-            path_slug_hn if path_slug_hn else None,
-            keys_hn if keys_hn else None,
-            hard_negative_weight=float(hard_negative_weight),
-        )
+        extra0 = _extra_hard_negative_class0_indices(tr, hard_paths, hard_keys)
         if extra0:
             print(f"[train] balanced_sampler: extra class-0 index slots from hard negatives: {len(extra0)}")
         bsp = BalancedTwoClassBatchSampler(
@@ -852,14 +653,20 @@ def train_one_run(
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
     else:
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=2)
-    scaler = torch.cuda.amp.GradScaler() if (use_cuda and use_amp) else None
+    # New torch.amp API (PyTorch 2.x); falls back to legacy torch.cuda.amp on older builds.
+    if use_cuda and use_amp:
+        try:
+            scaler = torch.amp.GradScaler("cuda")
+        except (TypeError, AttributeError):
+            scaler = torch.cuda.amp.GradScaler()
+    else:
+        scaler = None
 
     out_ckpt = out_ckpt or str(MODELS_DIR / f"{mode}.pt")
     os.makedirs(os.path.dirname(out_ckpt) or ".", exist_ok=True)
-    best_val_ap = -1.0
+    # Tracks the best validation selection score (legacy or realistic, see sel_norm).
+    best_val_score = -1.0
     patience_counter = 0
-
-    hn_excluded_xt = int(_hn_dbg.get("excluded_extra", 0))
 
     grad_accum_steps = max(1, int(grad_accum_steps))
     log_path = Path(OUTPUTS_DIR) / f"train_log_{mode}_{mf}.jsonl"
@@ -903,7 +710,11 @@ def train_one_run(
                         x[:, 3:] = 0.0
 
             if scaler is not None:
-                with torch.cuda.amp.autocast():
+                try:
+                    autocast_ctx = torch.amp.autocast(device_type="cuda")
+                except (TypeError, AttributeError):
+                    autocast_ctx = torch.cuda.amp.autocast()
+                with autocast_ctx:
                     logits = model(x)
                     loss = loss_fn(logits, y) / grad_accum_steps
                 scaler.scale(loss).backward()
@@ -1080,25 +891,13 @@ def train_one_run(
             tail = " ..." if len(test_per_source) > 10 else ""
             print("[test] per_source (shared thr):", " | ".join(parts) + tail)
 
-        extra_y_neg_sv = extra_p_neg_sv = None
         if extra_test_loader is not None:
             ey, ep_probs = eval_probs(model, extra_test_loader, device, temperature=T)
-            pred = (ep_probs >= float(best_thr)).astype(np.int64)
-            ey_i = np.asarray(ey, dtype=np.int64)
-            neg_m = ey_i == 0
-            n_neg = int(neg_m.sum())
-            pred_neg = pred[neg_m]
-            n_fp = int((pred_neg == 1).sum())
-            n_tn = int((pred_neg == 0).sum())
-            fp_rate = n_fp / max(1, n_neg)
-            print(
-                f"Extra test (no_fire subset @ thr={best_thr:.3f}) "
-                f"n_neg={n_neg} FP={n_fp} TN={n_tn} FPR_neg={fp_rate:.3f} "
-                f"(full n={len(ey_i)})"
-            )
-            if n_neg > 0:
-                extra_y_neg_sv = ey_i[neg_m]
-                extra_p_neg_sv = np.asarray(ep_probs, dtype=np.float64)[neg_m]
+            pred = (ep_probs >= best_thr).astype(np.int64)
+            n_fp = int((pred == 1).sum())
+            n_tn = int((pred == 0).sum())
+            fp_rate = n_fp / max(1, len(ey))
+            print(f"Extra test (drone no-fire) n={len(ey)} FP={n_fp} TN={n_tn} FP_rate={fp_rate:.3f}")
 
         if scheduler_kind == "plateau":
             sched.step(vm["ap"] if vm["ap"] == vm["ap"] else 0.0)
@@ -1109,10 +908,11 @@ def train_one_run(
         score_realistic = realistic_selection_score(vm)
         selection_score = score_realistic if sel_norm == "realistic" else score_legacy
 
-        # checkpoint selection metric: legacy = 0.5*F1 + 0.5*BalAcc;
-        # realistic = F1 + BalAcc + AP - 0.5*FPR (val @ best_thr)
-        if selection_score == selection_score and selection_score > best_val_ap:
-            best_val_ap = float(selection_score)
+        # Checkpoint selection metric. Both scores are computed at the val operating threshold:
+        #   - legacy   = 0.5 * F1 + 0.5 * BalAcc           (default, --selection_metric f1_balacc)
+        #   - realistic = F1 + BalAcc + AP - 0.5 * FPR     (--selection_metric realistic)
+        if selection_score == selection_score and selection_score > best_val_score:
+            best_val_score = float(selection_score)
             patience_counter = 0
             thr_alarm_raw = _best_threshold_mode(vy, vp, "alarm")
             # Precision-biased (review) threshold is never clamped — keep strict.
@@ -1145,15 +945,7 @@ def train_one_run(
             threshold_policies: dict = {}
             video_event_metrics = None
             try:
-                pol_grid = threshold_sweep_grid(
-                    vy,
-                    vp,
-                    ty,
-                    tp,
-                    thresholds=np.arange(0.10, 0.96, 0.05),
-                    extra_y_neg=extra_y_neg_sv,
-                    extra_p_neg=extra_p_neg_sv,
-                )
+                pol_grid = threshold_sweep_grid(vy, vp, ty, tp, thresholds=np.arange(0.10, 0.901, 0.05))
                 policy_path = Path(OUTPUTS_DIR) / f"threshold_policy_{mode}_{mf}.csv"
                 policy_path.parent.mkdir(parents=True, exist_ok=True)
                 pol_grid.to_csv(policy_path, index=False)
@@ -1235,64 +1027,13 @@ def train_one_run(
                     f"worst_source_by_recall={worst_source_by_recall}"
                 )
             extra_info = {}
-            fp_xt_written = Path(OUTPUTS_DIR) / f"extra_test_false_positives_{mode}_{mf}.csv"
             if extra_test_loader is not None:
-                ey_i = np.asarray(ey, dtype=np.int64)
-                ep_i = np.asarray(ep_probs, dtype=np.float64)
-                pred_i = (ep_i >= float(best_thr)).astype(np.int64)
-                nm_ck = ey_i == 0
-                n_neg_ck = int(nm_ck.sum())
-                pred_neg_ck = pred_i[nm_ck]
-                fp_n_ck = int((pred_neg_ck == 1).sum())
-                tn_n_ck = int((pred_neg_ck == 0).sum())
-                fpr_n_ck = float(fp_n_ck / max(1, n_neg_ck))
                 extra_info = {
-                    "extra_test_n": len(ey_i),
-                    "extra_test_n_no_fire": n_neg_ck,
-                    "extra_test_fp_no_fire": fp_n_ck,
-                    "extra_test_tn_no_fire": tn_n_ck,
-                    "extra_test_false_positive_rate_no_fire": fpr_n_ck,
-                    # Backward-compat keys (subset semantics = no_fire / negatives)
-                    "extra_test_fp": fp_n_ck,
-                    "extra_test_tn": tn_n_ck,
-                    "extra_test_fp_rate": fpr_n_ck,
+                    "extra_test_n": len(ey),
+                    "extra_test_fp": n_fp,
+                    "extra_test_tn": n_tn,
+                    "extra_test_fp_rate": fp_rate,
                 }
-                fp_mask_xt = nm_ck & (pred_i == 1)
-                cols_xt = [
-                    "path_rgb",
-                    "path_th",
-                    "source",
-                    "split",
-                    "key",
-                    "split_group",
-                    "label",
-                    "prob_fire",
-                    "threshold",
-                    "pred",
-                ]
-                if len(extra_test_df) != len(ey_i):
-                    pd.DataFrame(columns=cols_xt).to_csv(fp_xt_written, index=False)
-                    print(
-                        "[extra_test][WARN] extra_test row count != predictions; wrote empty FP template",
-                        flush=True,
-                    )
-                    print(f"[extra_test] false_positives saved: {fp_xt_written} (n=0)", flush=True)
-                elif fp_mask_xt.any():
-                    xt_base = extra_test_df.iloc[np.flatnonzero(fp_mask_xt)].copy()
-                    xt_base.loc[:, "prob_fire"] = ep_i[fp_mask_xt].astype(np.float32)
-                    xt_base.loc[:, "threshold"] = float(best_thr)
-                    xt_base.loc[:, "pred"] = pred_i[fp_mask_xt]
-                    present_xt = [c for c in cols_xt if c in xt_base.columns]
-                    xt_base[present_xt].to_csv(fp_xt_written, index=False)
-                    print(
-                        f"[extra_test] false_positives saved: {fp_xt_written} "
-                        f"(n={len(xt_base)})",
-                        flush=True,
-                    )
-                else:
-                    pd.DataFrame(columns=cols_xt).to_csv(fp_xt_written, index=False)
-                    print(f"[extra_test] false_positives saved: {fp_xt_written} (n=0)", flush=True)
-
             metrics = {
                 "mode": mode,
                 "model_family": mf,
@@ -1342,35 +1083,6 @@ def train_one_run(
                 "test": {k: (float(v) if not isinstance(v, np.ndarray) else v.tolist()) for k, v in tm.items()},
                 **extra_info,
             }
-            if hard_negative_csv and Path(str(hard_negative_csv)).exists():
-                metrics["hard_negative_training_stats"] = dict(_hn_dbg)
-                metrics["hard_negative_csv"] = str(hard_negative_csv)
-                metrics["hard_negative_weight"] = float(hard_negative_weight)
-            try:
-                _aug_dbg = dict(getattr(train_ds, "aug", {}) or {})
-            except Exception:
-                _aug_dbg = {}
-            metrics["augmentation"] = {
-                "profile": aug_str_norm,
-                "modal_dropout_p": float(modal_dropout_p),
-                "params": {
-                    k: _aug_dbg.get(k)
-                    for k in (
-                        "p_jitter",
-                        "p_blur",
-                        "blur_radius_max",
-                        "p_rgb_noise",
-                        "sigma_rgb",
-                        "p_thermal_noise",
-                        "sigma_thermal",
-                        "p_thermal_shift_scale",
-                        "thermal_scale_jitter",
-                        "thermal_shift_jitter",
-                        "p_combined_noise",
-                        "p_random_erase",
-                    )
-                },
-            }
             metrics_path = Path(OUTPUTS_DIR) / f"metrics_{mode}_{mf}.json"
             if mf == "early_fusion" and mode == "fusion":
                 metrics_path = Path(OUTPUTS_DIR) / f"metrics_{mode}.json"
@@ -1393,7 +1105,9 @@ def train_one_run(
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                print(f"Early stop (val AP did not improve for {patience} epochs)")
+                print(
+                    f"Early stop ({sel_norm} selection score did not improve for {patience} epochs)"
+                )
                 break
 
         epoch_row = {
@@ -1409,7 +1123,7 @@ def train_one_run(
             "val_selection_score": float(selection_score),
             "selection_metric": str(sel_norm),
             "val_auc": float(vm.get("auc", float("nan"))),
-            "best_val_score": float(best_val_ap),
+            "best_val_score": float(best_val_score),
             "temperature": float(T),
             "threshold": float(best_thr),
             "lr": float(opt.param_groups[0]["lr"]),
@@ -1464,64 +1178,5 @@ def train_one_run(
                 )
     except Exception as e:
         print(f"[final] threshold comparison skipped: {type(e).__name__}: {e}")
-
-    if robustness_eval and mode == "fusion" and Path(out_ckpt).exists():
-        metrics_rb = Path(OUTPUTS_DIR) / f"metrics_{mode}_{mf}.json"
-        if mf == "early_fusion" and mode == "fusion":
-            metrics_rb = Path(OUTPUTS_DIR) / f"metrics_{mode}.json"
-        hn_csv_on = bool(hard_negative_csv and Path(str(hard_negative_csv)).is_file())
-        if hn_csv_on and len(extra_test_df) == 0:
-            print(
-                "[robustness_eval] skipped: extra_test holdout has no rows after excluding hard-negative training overlaps",
-                flush=True,
-            )
-        else:
-            flame_rb = flame3_eval_slice(test_df, extra_test_df)
-            flame_rb, drop_rb = filter_df_existing_paths(flame_rb, mode="fusion")
-            flame_rb = flame_rb.reset_index(drop=True)
-            if drop_rb:
-                print(f"[robustness] dropped {drop_rb} FLAME3 eval rows (missing fusion files)")
-            if len(flame_rb) == 0:
-                msg_tail = ""
-                if hn_excluded_xt and len(extra_test_df) == 0:
-                    msg_tail = " — extra_test was fully excluded for unbiased evaluation"
-                print(
-                    f"[robustness] skipped: no flame3 / flame3_raw_extra rows in test ∪ extra_test after path filter{msg_tail}"
-                )
-            else:
-                try:
-                    try:
-                        ck_rb = torch.load(out_ckpt, map_location=device, weights_only=True)
-                    except TypeError:
-                        ck_rb = torch.load(out_ckpt, map_location=device)
-                    model.load_state_dict(ck_rb["state"])
-                    model.eval()
-                    thr_rb = float(ck_rb.get("threshold", 0.5))
-                    temp_rb = float(ck_rb.get("temperature", 1.0))
-                    rb_block = run_flame3_robustness_evaluation(
-                        model,
-                        device,
-                        flame3_eval_df=flame_rb,
-                        temperature=temp_rb,
-                        threshold=thr_rb,
-                        batch_size=int(bs),
-                        size=int(size),
-                        thermal_norm=thermal_norm,
-                        num_workers=int(num_workers),
-                        pin_memory=bool(loader_common.get("pin_memory", False)),
-                    )
-                    if rb_block:
-                        merge_robustness_into_metrics_json(metrics_rb, rb_block)
-                        print(
-                            f"[robustness] wrote robustness_eval ({len(flame_rb)} rows, thr={thr_rb:.4f}, T={temp_rb:.4f}) → {metrics_rb}"
-                        )
-                        try:
-                            augment_metrics_json_with_robustness_outputs(
-                                metrics_rb, csv_tag=f"{mode}_{mf}"
-                            )
-                        except Exception as e:
-                            print(f"[robustness] summary augmentation skipped: {type(e).__name__}: {e}")
-                except Exception as e:
-                    print(f"[robustness] skipped: {type(e).__name__}: {e}")
 
     return out_ckpt

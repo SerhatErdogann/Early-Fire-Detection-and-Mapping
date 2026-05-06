@@ -9,127 +9,6 @@ from PIL import Image, ImageEnhance, ImageFilter
 from torch.utils.data import Dataset
 
 
-# -----------------------------------------------------------------------------
-# Augmentation profiles
-# -----------------------------------------------------------------------------
-# Keep the model robust to the *same* perturbations exercised by the
-# `robustness_eval` corruption variants. The eval-time corrupter (see
-# ``src/training/robustness_eval.py``) injects RGB Gaussian noise sigma~0.038,
-# thermal Gaussian noise sigma~0.042, RGB blur sigma=1.6, thermal shift/scale
-# 1.14x and combined noise. Training augmentation must be a *superset* of those
-# so the model sees similar distributions and does not collapse FPR under noise.
-# Profiles are selected via the ``aug_strength`` constructor argument (CLI
-# ``--aug_strength``). Backward-compat default = ``"default"``.
-
-_BASE_DEFAULTS: dict = {
-    # RGB photometric jitter
-    "brightness": 0.4,
-    "contrast": 0.4,
-    "saturation": 0.4,
-    "p_jitter": 0.8,
-    # RGB blur (Gaussian)
-    "p_blur": 0.2,
-    "blur_radius_min": 0.2,
-    "blur_radius_max": 1.0,
-    # RGB additive Gaussian noise (in [0,1] CHW space)
-    "p_rgb_noise": 0.0,
-    "sigma_rgb": 0.0,
-    # Thermal noise
-    "p_thermal_noise": 0.5,
-    "sigma_thermal": 0.02,
-    # Thermal contrast / mean shift (matches eval thermal_shift_scale)
-    "p_thermal_shift_scale": 0.0,
-    "thermal_scale_jitter": 0.0,  # multiplicative around 0.5
-    "thermal_shift_jitter": 0.0,  # additive after re-centering
-    # Combined-modality noise (mirrors rgb_thermal_combined_noise variant)
-    "p_combined_noise": 0.0,
-    "sigma_combined_rgb": 0.0,
-    "sigma_combined_thermal": 0.0,
-    # Random erasing on RGB
-    "p_random_erase": 0.25,
-}
-
-_AUG_PROFILES: dict[str, dict] = {
-    # No augmentation at all (sanity / debugging).
-    "off": {
-        **_BASE_DEFAULTS,
-        "p_jitter": 0.0,
-        "p_blur": 0.0,
-        "p_rgb_noise": 0.0,
-        "sigma_rgb": 0.0,
-        "p_thermal_noise": 0.0,
-        "sigma_thermal": 0.0,
-        "p_thermal_shift_scale": 0.0,
-        "p_combined_noise": 0.0,
-        "p_random_erase": 0.0,
-    },
-    # Mild profile: same shape, lower intensities (good for tiny models).
-    "light": {
-        **_BASE_DEFAULTS,
-        "brightness": 0.2,
-        "contrast": 0.2,
-        "saturation": 0.2,
-        "p_jitter": 0.6,
-        "p_blur": 0.1,
-        "p_rgb_noise": 0.2,
-        "sigma_rgb": 0.015,
-        "p_thermal_noise": 0.4,
-        "sigma_thermal": 0.020,
-        "p_random_erase": 0.15,
-    },
-    # Backward-compatible (legacy hardcoded values).
-    "default": dict(_BASE_DEFAULTS),
-    # Stronger augmentation: covers most of robustness_eval distribution.
-    "strong": {
-        **_BASE_DEFAULTS,
-        "p_blur": 0.35,
-        "blur_radius_max": 1.6,
-        "p_rgb_noise": 0.5,
-        "sigma_rgb": 0.030,
-        "p_thermal_noise": 0.6,
-        "sigma_thermal": 0.040,
-        "p_thermal_shift_scale": 0.30,
-        "thermal_scale_jitter": 0.10,
-        "thermal_shift_jitter": 0.04,
-        "p_combined_noise": 0.20,
-        "sigma_combined_rgb": 0.025,
-        "sigma_combined_thermal": 0.035,
-    },
-    # Strict superset of robustness_eval corruption ranges. Use when external
-    # / drone no_fire FPR explodes under noise; expect tiny clean-recall hit.
-    "match_eval": {
-        **_BASE_DEFAULTS,
-        "brightness": 0.45,
-        "contrast": 0.45,
-        "p_jitter": 0.85,
-        "p_blur": 0.45,
-        "blur_radius_min": 0.3,
-        "blur_radius_max": 2.0,
-        "p_rgb_noise": 0.55,
-        "sigma_rgb": 0.045,
-        "p_thermal_noise": 0.65,
-        "sigma_thermal": 0.050,
-        "p_thermal_shift_scale": 0.40,
-        "thermal_scale_jitter": 0.14,
-        "thermal_shift_jitter": 0.06,
-        "p_combined_noise": 0.30,
-        "sigma_combined_rgb": 0.030,
-        "sigma_combined_thermal": 0.038,
-        "p_random_erase": 0.30,
-    },
-}
-
-
-def resolve_aug_profile(name: str | dict | None) -> dict:
-    """Return a profile dict; unknown names fall back to ``default``."""
-    if isinstance(name, dict):
-        out = dict(_BASE_DEFAULTS)
-        out.update(name)
-        return out
-    key = str(name or "default").strip().lower()
-    return dict(_AUG_PROFILES.get(key, _AUG_PROFILES["default"]))
-
-
 def _augment_rgb_pil(
     img: Image.Image,
     brightness: float = 0.4,
@@ -137,8 +16,6 @@ def _augment_rgb_pil(
     saturation: float = 0.4,
     p_jitter: float = 0.8,
     p_blur: float = 0.2,
-    blur_radius_min: float = 0.2,
-    blur_radius_max: float = 1.0,
 ) -> Image.Image:
     """Train-only RGB photometric augmentations (no geometry change)."""
     if torch.rand(()).item() < p_jitter and brightness > 0:
@@ -151,16 +28,14 @@ def _augment_rgb_pil(
         f = 1.0 + (torch.rand(()).item() * 2.0 - 1.0) * float(saturation)
         img = ImageEnhance.Color(img).enhance(max(0.0, f))
     if torch.rand(()).item() < p_blur:
-        rmin = max(0.0, float(blur_radius_min))
-        rmax = max(rmin + 1e-3, float(blur_radius_max))
-        radius = float(rmin + torch.rand(()).item() * (rmax - rmin))
+        radius = float(0.2 + torch.rand(()).item() * 0.8)
         img = img.filter(ImageFilter.GaussianBlur(radius=radius))
     return img
 
 
 def _maybe_random_erase_chw(rgb_chw: np.ndarray, p: float = 0.25) -> np.ndarray:
     """Train-only random erasing on RGB CHW array (in-place safe; thermal untouched)."""
-    if p <= 0 or torch.rand(()).item() >= p:
+    if torch.rand(()).item() >= p:
         return rgb_chw
     c, h, w = rgb_chw.shape
     eh = int(h * (0.05 + torch.rand(()).item() * 0.20))
@@ -173,60 +48,12 @@ def _maybe_random_erase_chw(rgb_chw: np.ndarray, p: float = 0.25) -> np.ndarray:
     return rgb_chw
 
 
-def _maybe_rgb_gaussian_noise_chw(
-    rgb_chw: np.ndarray, sigma: float = 0.0, p: float = 0.0
-) -> np.ndarray:
-    """Train-only additive Gaussian noise on RGB tensor in [0,1]; mirrors eval rgb_gaussian_noise."""
-    if sigma <= 0 or p <= 0 or torch.rand(()).item() >= p:
-        return rgb_chw
-    noise = (torch.randn(rgb_chw.shape).numpy() * float(sigma)).astype(np.float32)
-    return np.clip(rgb_chw + noise, 0.0, 1.0).astype(np.float32)
-
-
 def _maybe_thermal_noise(th_arr01: np.ndarray, sigma: float = 0.02, p: float = 0.5) -> np.ndarray:
     """Train-only Gaussian noise on thermal map already normalised to [0, 1]."""
-    if sigma <= 0 or p <= 0 or torch.rand(()).item() >= p:
+    if sigma <= 0 or torch.rand(()).item() >= p:
         return th_arr01
     noise = (torch.randn(th_arr01.shape).numpy() * float(sigma)).astype(np.float32)
     return np.clip(th_arr01 + noise, 0.0, 1.0).astype(np.float32)
-
-
-def _maybe_thermal_shift_scale(
-    th_arr01: np.ndarray,
-    p: float = 0.0,
-    scale_jitter: float = 0.0,
-    shift_jitter: float = 0.0,
-) -> np.ndarray:
-    """Train-only thermal mean/contrast jitter; mirrors eval thermal_shift_scale.
-
-    Applies ``(x - 0.5) * (1 + Δs) + 0.5 + Δm`` with random Δs∈[-scale_jitter, +scale_jitter]
-    and Δm∈[-shift_jitter, +shift_jitter]. Output clipped to [0, 1].
-    """
-    if p <= 0 or torch.rand(()).item() >= p:
-        return th_arr01
-    ds = float((torch.rand(()).item() * 2.0 - 1.0) * float(scale_jitter))
-    dm = float((torch.rand(()).item() * 2.0 - 1.0) * float(shift_jitter))
-    out = (th_arr01.astype(np.float32) - 0.5) * (1.0 + ds) + 0.5 + dm
-    return np.clip(out, 0.0, 1.0).astype(np.float32)
-
-
-def _maybe_combined_noise(
-    rgb_chw: np.ndarray,
-    th_arr01: np.ndarray,
-    p: float = 0.0,
-    sigma_rgb: float = 0.0,
-    sigma_th: float = 0.0,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Apply correlated RGB+thermal Gaussian noise simultaneously (eval rgb_thermal_combined_noise)."""
-    if p <= 0 or torch.rand(()).item() >= p:
-        return rgb_chw, th_arr01
-    if sigma_rgb > 0:
-        nr = (torch.randn(rgb_chw.shape).numpy() * float(sigma_rgb)).astype(np.float32)
-        rgb_chw = np.clip(rgb_chw + nr, 0.0, 1.0).astype(np.float32)
-    if sigma_th > 0:
-        nt = (torch.randn(th_arr01.shape).numpy() * float(sigma_th)).astype(np.float32)
-        th_arr01 = np.clip(th_arr01 + nt, 0.0, 1.0).astype(np.float32)
-    return rgb_chw, th_arr01
 
 
 def _hflip_pil(img: Image.Image) -> Image.Image:
@@ -409,14 +236,12 @@ class FlameDataset(Dataset):
         size: int = 384,
         train: bool = False,
         thermal_norm: str = "percentile",
-        aug_strength: str | dict | None = "default",
     ):
         self.df = df.reset_index(drop=True).copy()
         self.mode = (mode or "fusion").lower()
         self.size = int(size)
         self.train = bool(train)
         self.thermal_norm = str(thermal_norm or "percentile")
-        self.aug = resolve_aug_profile(aug_strength)
 
         if "label_fire" in self.df.columns:
             self.labels = pd.to_numeric(self.df["label_fire"], errors="coerce").fillna(0).astype(int).to_numpy()
@@ -435,27 +260,14 @@ class FlameDataset(Dataset):
         rgb_path = str(r["path_rgb"]) if "path_rgb" in r.index else ""
         rgb_pil = read_rgb_pil(rgb_path)
 
-        ap = self.aug
         if self.mode == "rgb":
             rgb_pil = _resize_pil(rgb_pil, self.size)
             if self.train:
                 rgb_pil, _dummy = _sync_geom_aug(rgb_pil, rgb_pil.convert("L"), self.size)
-                rgb_pil = _augment_rgb_pil(
-                    rgb_pil,
-                    brightness=float(ap["brightness"]),
-                    contrast=float(ap["contrast"]),
-                    saturation=float(ap["saturation"]),
-                    p_jitter=float(ap["p_jitter"]),
-                    p_blur=float(ap["p_blur"]),
-                    blur_radius_min=float(ap["blur_radius_min"]),
-                    blur_radius_max=float(ap["blur_radius_max"]),
-                )
+                rgb_pil = _augment_rgb_pil(rgb_pil)
             x = _to_chw01_rgb(rgb_pil)
             if self.train:
-                x = _maybe_rgb_gaussian_noise_chw(
-                    x, sigma=float(ap["sigma_rgb"]), p=float(ap["p_rgb_noise"])
-                )
-                x = _maybe_random_erase_chw(x, p=float(ap["p_random_erase"]))
+                x = _maybe_random_erase_chw(x)
         else:
             if self.th_col is None:
                 raise ValueError("Thermal path column missing (expected path_th or path_thermal).")
@@ -474,48 +286,17 @@ class FlameDataset(Dataset):
                 rgb_pil, th_pil = _sync_geom_aug(rgb_pil, th_pil, self.size)
                 # RGB-only photometric perturbations: do NOT touch thermal.
                 if self.mode == "fusion":
-                    rgb_pil = _augment_rgb_pil(
-                        rgb_pil,
-                        brightness=float(ap["brightness"]),
-                        contrast=float(ap["contrast"]),
-                        saturation=float(ap["saturation"]),
-                        p_jitter=float(ap["p_jitter"]),
-                        p_blur=float(ap["p_blur"]),
-                        blur_radius_min=float(ap["blur_radius_min"]),
-                        blur_radius_max=float(ap["blur_radius_max"]),
-                    )
+                    rgb_pil = _augment_rgb_pil(rgb_pil)
 
             rgb = _to_chw01_rgb(rgb_pil)
             th_arr = (np.asarray(th_pil).astype(np.float32) / 255.0)
             if self.train:
+                # RGB random erasing applied AFTER geometry, only for fusion;
+                # thermal stays clean to preserve modality consistency.
                 if self.mode == "fusion":
-                    # Combined modality noise (mirrors eval rgb_thermal_combined_noise).
-                    rgb, th_arr = _maybe_combined_noise(
-                        rgb,
-                        th_arr,
-                        p=float(ap["p_combined_noise"]),
-                        sigma_rgb=float(ap["sigma_combined_rgb"]),
-                        sigma_th=float(ap["sigma_combined_thermal"]),
-                    )
-                    # Independent RGB Gaussian noise (eval rgb_gaussian_noise).
-                    rgb = _maybe_rgb_gaussian_noise_chw(
-                        rgb, sigma=float(ap["sigma_rgb"]), p=float(ap["p_rgb_noise"])
-                    )
-                    # RGB random erasing AFTER all photometric noise.
-                    rgb = _maybe_random_erase_chw(rgb, p=float(ap["p_random_erase"]))
-                # Independent thermal Gaussian noise (eval thermal_gaussian_noise).
-                th_arr = _maybe_thermal_noise(
-                    th_arr,
-                    sigma=float(ap["sigma_thermal"]),
-                    p=float(ap["p_thermal_noise"]),
-                )
-                # Thermal contrast/mean shift (eval thermal_shift_scale).
-                th_arr = _maybe_thermal_shift_scale(
-                    th_arr,
-                    p=float(ap["p_thermal_shift_scale"]),
-                    scale_jitter=float(ap["thermal_scale_jitter"]),
-                    shift_jitter=float(ap["thermal_shift_jitter"]),
-                )
+                    rgb = _maybe_random_erase_chw(rgb)
+                # Light Gaussian noise on thermal map only.
+                th_arr = _maybe_thermal_noise(th_arr, sigma=0.02)
             th = _to_1hw01(th_arr)
             if self.mode == "thermal":
                 x = th

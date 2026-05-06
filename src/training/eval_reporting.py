@@ -81,22 +81,10 @@ def threshold_sweep_grid(
     ty: np.ndarray,
     tp: np.ndarray,
     thresholds: np.ndarray | list[float] | None = None,
-    extra_y_neg: np.ndarray | None = None,
-    extra_p_neg: np.ndarray | None = None,
 ) -> pd.DataFrame:
-    """Dense table of metrics at each threshold on val / test splits.
-
-    If ``extra_y_neg`` / ``extra_p_neg`` are provided (typically label==0 subset of external / extra_test rows),
-    add ``extra_test_neg_false_positive_rate`` per threshold.
-    """
+    """Dense table of metrics at each threshold on val / test splits."""
     if thresholds is None:
         thresholds = np.arange(0.10, 0.901, 0.05)
-    use_ext = (
-        extra_y_neg is not None
-        and extra_p_neg is not None
-        and len(extra_y_neg) == len(extra_p_neg)
-        and len(extra_y_neg) > 0
-    )
     rows: list[dict[str, Any]] = []
     for t in thresholds:
         t = float(t)
@@ -119,77 +107,10 @@ def threshold_sweep_grid(
             "test_specificity": mt["specificity"],
             "test_false_positive_rate": mt["false_positive_rate"],
         }
-        row["realistic_score_val"] = float(mv["f1"]) + float(mv["bal_acc"]) - 0.5 * float(mv["false_positive_rate"])
-        row["realistic_score_test"] = float(mt["f1"]) + float(mt["bal_acc"]) - 0.5 * float(mt["false_positive_rate"])
-        if use_ext:
-            mm = metrics_at_threshold(np.asarray(extra_y_neg), np.asarray(extra_p_neg), t)
-            row["extra_test_neg_false_positive_rate"] = float(mm["false_positive_rate"])
+        row["realistic_score_val"] = realistic_selection_score(mv)
+        row["realistic_score_test"] = realistic_selection_score(mt)
         rows.append(row)
     return pd.DataFrame(rows)
-
-
-def policy_external_low_false_alarm(
-    grid: pd.DataFrame,
-    *,
-    min_val_recall: float = 0.90,
-) -> dict[str, Any] | None:
-    """
-    Threshold on validation with ``val_recall >= min_val_recall`` that minimizes external / extra_test
-    negative FPR (column ``extra_test_neg_false_positive_rate``), tie-break by ``val_f1``.
-    """
-    if grid is None or len(grid) == 0 or "extra_test_neg_false_positive_rate" not in grid.columns:
-        return None
-    cand = grid[grid["val_recall"] >= float(min_val_recall)]
-    if len(cand) == 0:
-        return None
-    row = (
-        cand.sort_values(
-            by=["extra_test_neg_false_positive_rate", "val_f1"],
-            ascending=[True, False],
-        )
-        .iloc[0]
-    )
-    t = float(row["threshold"])
-
-    def pack(series: pd.Series, prefix: str) -> dict[str, Any]:
-        return {
-            "threshold": float(series["threshold"]),
-            "acc": float(series[f"{prefix}_acc"]),
-            "f1": float(series[f"{prefix}_f1"]),
-            "recall": float(series[f"{prefix}_recall"]),
-            "precision": float(series[f"{prefix}_precision"]),
-            "bal_acc": float(series[f"{prefix}_bal_acc"]),
-            "specificity": float(series[f"{prefix}_specificity"]),
-            "false_positive_rate": float(series[f"{prefix}_false_positive_rate"]),
-            "realistic_score": (
-                float(series[f"{prefix}_f1"]) + float(series[f"{prefix}_bal_acc"])
-                - 0.5 * float(series[f"{prefix}_false_positive_rate"])
-            ),
-        }
-
-    ev_raw = row.get("extra_test_neg_false_positive_rate")
-    try:
-        evf = float(ev_raw)
-    except (TypeError, ValueError):
-        evf = None
-    import math as _math
-
-    if evf is not None and (_math.isnan(evf) or _math.isinf(evf)):
-        evf = None
-    return {
-        "threshold": t,
-        "min_val_recall_constraint": float(min_val_recall),
-        "strategy": (
-            "val_recall>="
-            + str(min_val_recall)
-            + ", minimize extra_test_neg_false_positive_rate, tie_break val_f1"
-        ),
-        "val": pack(row, "val"),
-        "test": pack(row, "test"),
-        "extra_eval": {
-            "extra_test_negative_false_positive_rate_at_threshold": evf,
-        },
-    }
 
 
 def select_threshold_policies(grid: pd.DataFrame) -> dict[str, dict[str, Any]]:
@@ -233,7 +154,7 @@ def select_threshold_policies(grid: pd.DataFrame) -> dict[str, dict[str, Any]]:
             "realistic_score": float(row["realistic_score_test"]),
         }
 
-    out = {
+    return {
         "high_recall": {
             "threshold": float(hr["threshold"]),
             "val": pack(hr, "val"),
@@ -253,32 +174,34 @@ def select_threshold_policies(grid: pd.DataFrame) -> dict[str, dict[str, Any]]:
             "strategy": "min val_false_positive_rate, tie_break val_f1",
         },
     }
-    ext = policy_external_low_false_alarm(grid, min_val_recall=0.90)
-    if ext:
-        out["external_low_false_alarm"] = ext
-    return out
+
+
+def _safe_metric(x: Any, default: float = 0.0) -> float:
+    """Return a finite float for ``x`` (NaN / non-numeric -> ``default``)."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return float(default)
+    return float(default) if v != v or v in (float("inf"), float("-inf")) else v
 
 
 def realistic_selection_score(vm: dict) -> float:
-    """val: f1 + bal_acc + ap - 0.5 * fpr (composite for epoch selection).
+    """Composite epoch-selection score on the validation split.
 
-    AP captures ranking quality (threshold-independent); F1 + bal_acc cover the
-    operating point at the chosen threshold; -0.5 * FPR penalises false alarms.
-    The AP term was added because val F1/bal_acc alone can favour epochs that
-    overfit to val while later epochs (with stronger AP/test bal_acc) score
-    lower on the operating-point metrics.
+    Formula: ``F1 + bal_acc + AP - 0.5 * FPR``.
+
+    - ``F1`` and ``bal_acc`` capture the operating-point quality.
+    - ``AP`` (average precision) rewards threshold-independent ranking.
+    - ``-0.5 * FPR`` penalises false alarms.
+
+    Only consumed when the trainer is invoked with ``--selection_metric realistic``;
+    the default ``f1_balacc`` policy uses the legacy ``0.5 * (F1 + bal_acc)`` score.
+    NaN-safe for early epochs that may produce undefined metrics.
     """
-    def _safe(x: float) -> float:
-        try:
-            v = float(x)
-        except (TypeError, ValueError):
-            return 0.0
-        return 0.0 if v != v else v  # NaN guard
-
-    f1 = _safe(vm.get("f1", 0.0))
-    bal_acc = _safe(vm.get("bal_acc", 0.0))
-    ap = _safe(vm.get("ap", 0.0))
-    fpr = _safe(vm.get("false_positive_rate", 0.0))
+    f1 = _safe_metric(vm.get("f1"))
+    bal_acc = _safe_metric(vm.get("bal_acc"))
+    ap = _safe_metric(vm.get("ap"))
+    fpr = _safe_metric(vm.get("false_positive_rate"))
     return f1 + bal_acc + ap - 0.5 * fpr
 
 

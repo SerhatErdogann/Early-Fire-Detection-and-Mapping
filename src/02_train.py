@@ -54,13 +54,7 @@ def main():
     ap.add_argument("--backbone", default=None, help="resnet18 | resnet50 | efficientnet_b0")
     ap.add_argument("--no_amp", action="store_true", help="Disable mixed precision")
     ap.add_argument("--no_calibrate_report", action="store_true", help="Skip calibration summary printout after training")
-    ap.add_argument("--hard_negative_csv", default=None, help="CSV with path_rgb/path_th and/or key for hard negatives")
-    ap.add_argument(
-        "--hard_negative_weight",
-        type=float,
-        default=2.0,
-        help="Sampler weight multiplier for hard-negative CSV matches (balanced_sampler repeats class-0 slots). Default 2.0.",
-    )
+    ap.add_argument("--hard_negative_csv", default=None, help="CSV with path_rgb column for hard negatives (upweighted)")
     ap.add_argument("--save_oof_predictions", action="store_true", help="Save validation OOF probs on best epoch")
     ap.add_argument("--grad_accum_steps", type=int, default=1, help="Gradient accumulation steps")
     ap.add_argument(
@@ -129,23 +123,6 @@ def main():
         help=(
             "Fusion-only modal dropout probability per batch. With prob p we zero "
             "either RGB (channels 0:3) or thermal (channel 3). 0.10 recommended."
-        ),
-    )
-    ap.add_argument(
-        "--aug_strength",
-        choices=["off", "light", "default", "strong", "match_eval"],
-        default="default",
-        help=(
-            "Train-time augmentation profile. 'strong' covers most of robustness_eval; "
-            "'match_eval' is a strict superset (recommended when external no_fire FPR explodes under noise)."
-        ),
-    )
-    ap.add_argument(
-        "--robustness_eval",
-        action="store_true",
-        help=(
-            "After fusion training only: evaluate FLAME3 test∪extra_test with corruption variants; "
-            "append robustness_eval to the same metrics JSON (training/checkpoint unchanged)."
         ),
     )
     args = ap.parse_args()
@@ -241,7 +218,6 @@ def main():
             model_family=mf,
             calibrate_report=not args.no_calibrate_report,
             hard_negative_csv=args.hard_negative_csv,
-            hard_negative_weight=float(args.hard_negative_weight),
             save_oof_predictions=args.save_oof_predictions,
             grad_accum_steps=args.grad_accum_steps,
             exclude_sources=[s.strip() for s in str(args.exclude_sources).split(",") if s.strip()],
@@ -259,8 +235,6 @@ def main():
             selection_metric=str(args.selection_metric),
             source_weights=str(args.source_weights),
             modal_dropout_p=float(args.modal_dropout_p),
-            robustness_eval=bool(args.robustness_eval),
-            aug_strength=str(args.aug_strength),
         )
 
 
