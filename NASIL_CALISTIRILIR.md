@@ -102,10 +102,56 @@ streamlit run src/07_ui.py
 
 Tarayıcıda açılan adresi (terminalde yazar) kullanın.
 
-Streamlit içindeki akış:
-- **Hızlı Test**: video yükle → inference + risk + event üret → timeline + frame panel
-- **Model Metrikleri**: `outputs/metrics_*.json` gösterir
-- **İnceleme (CSV ile)**: daha önce üretilmiş `outputs/video_predictions_scored.csv` dosyasını açar
+Streamlit içindeki akış (sade arayüz):
+- **Hızlı Test**: video yükle → tahmin → "Yangın tespit edildi/edilmedi" verdict kartı + 4 özet metric (max güven, fire frame sayısı, event sayısı, ilk tespit zamanı) + olasılık/risk timeline.
+  - Detaylı tablo, fire frame listesi ve manuel frame tarayıcı **"📊 Detaylı analiz"** açılır panelinin içindedir.
+  - Yüklenen video diagnostics, çıktı dosya yolları ve ham JSON **"🛠️ Geliştirici / Debug bilgileri"** panelinin içindedir.
+- **İnceleme (CSV)**: önceden üretilmiş `outputs/video_predictions_scored.csv` üzerinden filtre/sıralama/sayfalama.
+- **Model Metrikleri**: `outputs/metrics_*.json` özet tablosu + ham JSON.
+- **Video Eval (batch)**: `outputs/eval_summary.csv` görüntüleme.
+
+> Noise / robustness testleri ayrı bir CLI modülündedir (`src/eval/robustness_eval.py`) ve UI'a karışmaz; aşağıdaki "Robustness değerlendirmesi" bölümüne bakın.
+
+---
+
+## 7. Veri sızıntısı denetimi
+
+Yeni bir master index oluşturduktan sonra train/val/test arasında çakışma olup olmadığını kontrol edin:
+
+```powershell
+python scripts/check_leakage.py
+```
+
+Tüm bölme key'leri (`path_rgb`, `path_th`, `key`, `split_group`, video stem) üzerinden çapraz kontrol yapar; bir uyarı/uyumsuzluk varsa terminalde belirtir.
+
+---
+
+## 8. Robustness değerlendirmesi (offline, ayrı modül)
+
+Eğitilmiş bir checkpoint'in giriş bozulmaları altındaki davranışını ölçmek için:
+
+```powershell
+python -m src.eval.robustness_eval `
+  --ckpt models/dual_branch.pt `
+  --csv data/master_index.parquet `
+  --split test `
+  --corruptions all `
+  --severities 1,2,3 `
+  --out outputs/robustness_eval.csv
+```
+
+Çıktı: `outputs/robustness_eval.csv` — her (corruption, severity) için `n, acc, bal_acc, precision, recall, F1, specificity, FPR, AUC, AP`.
+"clean" satırı standart val/test ölçümüne eşittir, kontrol noktası olarak kullanılır.
+
+Sadece bir korruption türü:
+
+```powershell
+python -m src.eval.robustness_eval --ckpt models/dual_branch.pt --csv data/master_index.parquet `
+  --split test --corruptions gauss_noise_thermal --severities 1,2,3 `
+  --out outputs/robustness_thermal_noise.csv
+```
+
+> Bu modül model'in sadece çıkarım çıkışını ölçer; eğitim verisini, dataset.py augmentation'larını veya threshold seçimini etkilemez. Gerçek inference akışı (UI / `src/05_video_infer.py` / `src/inference/video.py`) bu modüle bağlı değildir.
 
 ---
 
