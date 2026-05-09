@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 
 from src.eval.event_extractor import extract_events
+from src.inference.model_loader import route_checkpoint_for_video
 from src.inference.video import run_video_inference
 from src.risk.scoring import build_risk_table
 
@@ -31,22 +32,19 @@ def run_analysis_pipeline(
     bench_json = out_dir / "video_predictions.benchmark.json"
 
     a = preset_args
-    ckpt_eff = ckpt_path
-    if not th_path:
-        try:
-            from config import CKPT_RGB as _CKPT_RGB
 
-            ckpt_eff = str(_CKPT_RGB)
-        except Exception:
-            ckpt_eff = "models/rgb.pt"
+    ckpt_fusion, ckpt_rgb, ckpt_thermal, vid_mode = route_checkpoint_for_video(
+        str(ckpt_path),
+        has_thermal_video=bool(th_path and str(th_path).strip()),
+    )
 
     run_video_inference(
         rgb_video_path=rgb_path,
         th_video_path=th_path,
-        ckpt_fusion=str(ckpt_path) if th_path else None,
-        ckpt_rgb=str(ckpt_eff) if not th_path else None,
-        ckpt_thermal=None,
-        mode="fusion" if th_path else "rgb",
+        ckpt_fusion=ckpt_fusion,
+        ckpt_rgb=ckpt_rgb,
+        ckpt_thermal=ckpt_thermal,
+        mode=vid_mode,
         size=int(a.get("size", 224)),
         step_frames=int(a.get("step", 6)),
         smooth_window=int(a.get("smooth_win", 7)),
