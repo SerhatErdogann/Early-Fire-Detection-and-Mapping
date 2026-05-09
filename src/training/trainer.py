@@ -428,6 +428,32 @@ def append_experiment_csv_row(csv_path: str | Path, row: dict) -> None:
         w.writerow(row)
 
 
+def _gated_fusion_reg_loss(
+    aux: dict,
+    *,
+    entropy_weight: float,
+    min_thermal_weight: float,
+    min_thermal_floor: float,
+    balance_weight: float,
+) -> torch.Tensor:
+    """Auxiliary losses for ``DualBranchGatedFusion`` to reduce RGB-only gate collapse."""
+    g_r = aux["gate_rgb"]
+    g_t = aux["gate_thermal"]
+    device = g_r.device
+    dtype = g_r.dtype
+    total = torch.zeros((), device=device, dtype=dtype)
+    if entropy_weight > 0:
+        st = torch.stack([g_r.clamp_min(1e-8), g_t.clamp_min(1e-8)], dim=1)
+        ent = -(st * st.log()).sum(dim=1).mean()
+        total = total - float(entropy_weight) * ent
+    if min_thermal_weight > 0 and float(min_thermal_floor) > 0:
+        pen = torch.relu(float(min_thermal_floor) - g_t).pow(2).mean()
+        total = total + float(min_thermal_weight) * pen
+    if balance_weight > 0:
+        total = total + float(balance_weight) * (g_r - g_t).pow(2).mean()
+    return total.float()
+
+
 def train_one_run(
     csv_path,
     mode="fusion",
@@ -473,6 +499,12 @@ def train_one_run(
     balanced_thermal_aug: bool = True,
     experiment_log_csv: str | None = None,
     experiment_name: str | None = None,
+    gate_entropy_weight: float = 0.0,
+    gate_min_thermal_floor: float = 0.0,
+    gate_min_thermal_weight: float = 0.0,
+    gate_balance_weight: float = 0.0,
+    rgb_aug_intensity: float = 1.0,
+    thermal_aug_intensity: float = 1.0,
 ):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     use_cuda = torch.cuda.is_available()
@@ -656,7 +688,7 @@ def train_one_run(
         f"pin_memory={loader_common['pin_memory']}, "
         f"prefetch={loader_common.get('prefetch_factor', 'n/a')}, "
         f"persistent={loader_common['persistent_workers']}, "
-        f"thermal_norm={thermal_norm}"
+        f"thermal_norm={thermal_norm} rgb_aug={float(rgb_aug_intensity):.2f} th_aug={float(thermal_aug_intensity):.2f}"
     )
     eff_bs = int(bs) * max(1, int(grad_accum_steps))
     print(f"[train] effective_batch_size={eff_bs} (bs={int(bs)} x grad_accum_steps={int(max(1, grad_accum_steps))})")
@@ -670,6 +702,8 @@ def train_one_run(
         thermal_mu=thermal_mu_es,
         thermal_sigma=thermal_sig_es,
         balanced_thermal_aug=balanced_thermal_aug,
+        rgb_aug_intensity=float(rgb_aug_intensity),
+        thermal_aug_intensity=float(thermal_aug_intensity),
     )
     if loss_mode == "balanced_sampler":
         extra0 = _extra_hard_negative_class0_indices(tr, hard_paths, hard_keys)
@@ -796,7 +830,20 @@ def train_one_run(
     else:
         scaler = None
 
-    out_ckpt = out_ckpt or str(MODELS_DIR / f"{mode}.pt")
+    use_gated_reg = (
+        mf == "dual_branch_gated_fusion"
+        and (
+            float(gate_entropy_weight) > 0.0
+            or float(gate_min_thermal_weight) > 0.0
+            or float(gate_balance_weight) > 0.0
+        )
+    )
+    if use_gated_reg:
+        print(
+            "[train] gated fusion regularizers: "
+            f"w_ent={float(gate_entropy_weight):g} floor={float(gate_min_thermal_floor):g} "
+            f"w_min_th={float(gate_min_thermal_weight):g} w_bal={float(gate_balance_weight):g}"
+        )
     os.makedirs(os.path.dirname(out_ckpt) or ".", exist_ok=True)
     # Tracks the best validation selection score (legacy or realistic, see sel_norm).
     best_val_score = -1.0
@@ -869,16 +916,46 @@ def train_one_run(
                 except (TypeError, AttributeError):
                     autocast_ctx = torch.cuda.amp.autocast()
                 with autocast_ctx:
-                    logits = model(x)
-                    loss = loss_fn(logits, y) / grad_accum_steps
+                    if use_gated_reg:
+                        logits, aux = model(x, return_aux=True)
+                        loss_cls = loss_fn(logits, y) / grad_accum_steps
+                        loss_reg = (
+                            _gated_fusion_reg_loss(
+                                aux,
+                                entropy_weight=gate_entropy_weight,
+                                min_thermal_weight=gate_min_thermal_weight,
+                                min_thermal_floor=gate_min_thermal_floor,
+                                balance_weight=gate_balance_weight,
+                            )
+                            / grad_accum_steps
+                        )
+                        loss = loss_cls + loss_reg
+                    else:
+                        logits = model(x)
+                        loss = loss_fn(logits, y) / grad_accum_steps
                 scaler.scale(loss).backward()
                 if (bi % grad_accum_steps == 0) or (bi == len(train_loader)):
                     scaler.step(opt)
                     scaler.update()
                     opt.zero_grad(set_to_none=True)
             else:
-                logits = model(x)
-                loss = loss_fn(logits, y) / grad_accum_steps
+                if use_gated_reg:
+                    logits, aux = model(x, return_aux=True)
+                    loss_cls = loss_fn(logits, y) / grad_accum_steps
+                    loss_reg = (
+                        _gated_fusion_reg_loss(
+                            aux,
+                            entropy_weight=gate_entropy_weight,
+                            min_thermal_weight=gate_min_thermal_weight,
+                            min_thermal_floor=gate_min_thermal_floor,
+                            balance_weight=gate_balance_weight,
+                        )
+                        / grad_accum_steps
+                    )
+                    loss = loss_cls + loss_reg
+                else:
+                    logits = model(x)
+                    loss = loss_fn(logits, y) / grad_accum_steps
                 loss.backward()
                 if (bi % grad_accum_steps == 0) or (bi == len(train_loader)):
                     opt.step()
@@ -1285,6 +1362,12 @@ def train_one_run(
                         "thermal_lr_mult": float(thermal_lr_mult),
                         "modal_dropout_p": float(modal_dropout_p),
                         "thermal_norm": str(thermal_norm),
+                        "rgb_aug_intensity": float(rgb_aug_intensity),
+                        "thermal_aug_intensity": float(thermal_aug_intensity),
+                        "gate_entropy_weight": float(gate_entropy_weight),
+                        "gate_min_thermal_floor": float(gate_min_thermal_floor),
+                        "gate_min_thermal_weight": float(gate_min_thermal_weight),
+                        "gate_balance_weight": float(gate_balance_weight),
                     },
                     "state": model.state_dict(),
                     # Default inference threshold (operating point) and analysis threshold (F1-optimal)
@@ -1490,6 +1573,12 @@ def train_one_run(
             "freeze_rgb_epochs": int(frz_rgb),
             "thermal_lr_mult": float(thermal_lr_mult),
             "modal_dropout_p": float(modal_dropout_p),
+            "rgb_aug_intensity": float(rgb_aug_intensity),
+            "thermal_aug_intensity": float(thermal_aug_intensity),
+            "gate_entropy_weight": float(gate_entropy_weight),
+            "gate_min_thermal_floor": float(gate_min_thermal_floor),
+            "gate_min_thermal_weight": float(gate_min_thermal_weight),
+            "gate_balance_weight": float(gate_balance_weight),
             "selection_metric": str(sel_norm),
             "loss_name": str(ln),
             "out_ckpt": str(out_ckpt),

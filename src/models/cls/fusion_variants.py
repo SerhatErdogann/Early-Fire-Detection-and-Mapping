@@ -60,9 +60,9 @@ class DualBranchGatedFusion(nn.Module):
         self.last_gate_thermal = g[:, 1].detach().mean()
         if return_aux:
             return logits, {
-                "gate_rgb": g[:, 0].detach(),
-                "gate_thermal": g[:, 1].detach(),
-                "logits_gate": logits_gate.detach(),
+                "gate_rgb": g[:, 0],
+                "gate_thermal": g[:, 1],
+                "logits_gate": logits_gate,
             }
         return logits
 

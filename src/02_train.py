@@ -86,7 +86,7 @@ def main():
         default="",
         help=(
             "Thermal normalization: percentile (default) | minmax | uint16_div | "
-            "train_zscore (μ,σ from TRAIN rows, z→[0,1])"
+            "train_zscore (mu,sigma from TRAIN rows, z mapped to [0,1])"
         ),
     )
     ap.add_argument(
@@ -167,7 +167,43 @@ def main():
     ap.add_argument(
         "--no_balanced_thermal_aug",
         action="store_true",
-        help="Disable extra thermal-only photometric/blur/erase/noise aug (train fusion/thermal).",
+        help="Disable extra thermal-only photometric/blur/erase/random-patch aug (train fusion/thermal).",
+    )
+    ap.add_argument(
+        "--rgb_aug_intensity",
+        type=float,
+        default=1.0,
+        help="Scale train-time RGB photometric jitter / blur / erase (1.0 = default strength).",
+    )
+    ap.add_argument(
+        "--thermal_aug_intensity",
+        type=float,
+        default=1.0,
+        help="Scale train-time thermal PIL aug and thermal random-erase probability.",
+    )
+    ap.add_argument(
+        "--gate_entropy_weight",
+        type=float,
+        default=0.0,
+        help="dual_branch_gated_fusion only: encourage high gate entropy (-w * mean H(g)); reduces RGB-only collapse.",
+    )
+    ap.add_argument(
+        "--gate_min_thermal_floor",
+        type=float,
+        default=0.0,
+        help="dual_branch_gated_fusion only: soft minimum target for thermal soft gate mass (used with --gate_min_thermal_weight).",
+    )
+    ap.add_argument(
+        "--gate_min_thermal_weight",
+        type=float,
+        default=0.0,
+        help="dual_branch_gated_fusion only: weight for relu(floor - gate_thermal)^2 penalty.",
+    )
+    ap.add_argument(
+        "--gate_balance_weight",
+        type=float,
+        default=0.0,
+        help="dual_branch_gated_fusion only: weight for (gate_rgb - gate_thermal)^2 modality balance term.",
     )
     ap.add_argument(
         "--experiment_log_csv",
@@ -295,6 +331,12 @@ def main():
             thermal_lr_mult=float(args.thermal_lr_mult),
             label_smoothing=float(args.label_smoothing),
             balanced_thermal_aug=not bool(args.no_balanced_thermal_aug),
+            rgb_aug_intensity=float(args.rgb_aug_intensity),
+            thermal_aug_intensity=float(args.thermal_aug_intensity),
+            gate_entropy_weight=float(args.gate_entropy_weight),
+            gate_min_thermal_floor=float(args.gate_min_thermal_floor),
+            gate_min_thermal_weight=float(args.gate_min_thermal_weight),
+            gate_balance_weight=float(args.gate_balance_weight),
             experiment_log_csv=(str(args.experiment_log_csv).strip() or None),
             experiment_name=(str(args.experiment_name).strip() or None),
         )
