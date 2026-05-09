@@ -14,7 +14,7 @@ RGB + termal görüntü füzyonu kullanan yangın/no-fire sınıflandırıcısı
 - **Leakage kontrol:** `scripts/check_leakage.py` — indeks bölmeleri üzerinden sızıntı denetimi.
 - **Öncelikli deney süiti:** `scripts/run_priority_experiment_suite.py` — sıralı gated/attention/mid fusion eğitimleri, robustness/ablation + teşhis çıktıları.
 - **Kaggle tam süit:** `scripts/run_kaggle_full_suite.py` — grid eğitim, tamamlanan `experiment_name` atlama, `logs/failed_runs.csv`, arşivlenmiş checkpoint (`models/by_experiment/`), otomatik `select_best`.
-- **En iyi model:** `scripts/select_best_and_report.py` — `improve_results.csv` üzerinden seçim ve rapor (`suite_audit` satırları hariç); varsa `models/by_experiment/{slug}.pt` kopyalanır.
+- **En iyi model raporu:** `scripts/select_best_and_report.py` — `improve_results.csv` yoksa (yerel) çıkış **0** ve kısa stub **Markdown**. CSV varken rapor **üç öneri**: `best_recall_model`, `best_low_false_alarm_model`, `best_balanced_model` (tek “kazanan” yok). Varsayılan olarak `kaggle_gated_anticollapse_safe_v1` dışlanır. `best_balanced` → `best_model.pt` (`--no_copy_ckpt` ile yalnızca rapor).
 
 Notebook hücre akışı (Kaggle elle çalıştırma): `scripts/kaggle_notebook_cells_tr.md`.
 
@@ -83,7 +83,7 @@ python scripts/run_priority_experiment_suite.py --dry_run \
 | Bayrak | Açıklama |
 |--------|-----------|
 | `--model_family` | `early_fusion`, `dual_branch_fusion`, `dual_branch_gated_fusion`, `dual_branch_attention_fusion`, `dual_branch_mid_fusion` |
-| `--selection_metric` | `f1_balacc`, `realistic`, `recall_fpr` (recall≥0.98 sonra min FPR) |
+| `--selection_metric` | `f1_balacc`, `realistic`, `recall_fpr` (val recall≥0.98 kapısından sonra operasyonel bileşik: yakalama, F1, bal_acc, −FPR, −ECE, −Brier) |
 | `--thermal_norm` | `percentile`, `minmax`, `uint16_div`, `train_zscore` |
 | `--modal_dropout_p` | Füzyon modalite dropout olasılığı |
 | `--thermal_lr_mult`, `--freeze_rgb_epochs` | Dual-branch ısıtma politikası |
@@ -111,10 +111,15 @@ Checkpoint seçimi dropdown’dan yapılır; thermal yoksa RGB checkpoint’ına
 ## En iyi model seçimi
 
 ```powershell
-python scripts/select_best_and_report.py ^
-  --results_csv outputs/improve_results.csv ^
-  --out_ckpt models/best_model.pt ^
-  --out_md outputs/best_model_report.md
+python scripts/select_best_and_report.py `
+  --results_csv outputs/improve_results.csv `
+  --out_md outputs/best_model_report.md `
+  --copy_balanced_ckpt models/best_model.pt
+
+# Yerelde CSV yoksa: exit 0, stub MD (Kaggle sonrası yeniden çalıştırın).
+# binary_root yanlış pozitif denetimi — FP listesi, kaynak bazlı FPR, galeri:
+
+python scripts/run_binary_root_audit.py --ckpt models/best_model.pt --csv outputs/flame_index.parquet --out_dir outputs/binary_root_audit
 ```
 
 Kaggle’da yolları `/kaggle/working/outputs/...` ve `/kaggle/working/models/...` ile değiştirin. Süit sonunda `run_kaggle_full_suite.py` aynı adımı otomatik uygular ( `--no-select-best` ile kapatabilirsiniz).
