@@ -534,6 +534,50 @@ def _render_analysis_dashboard(
             st.code(txt[:8000], language="json")
 
 
+def _infer_video_output_csv(filename: str) -> bool:
+    """Video çıkarımı / GIS çıktıları — metrik raporu seçicisinden çıkar."""
+    n = filename.lower()
+    return (
+        n.startswith("video_predictions")
+        or "predictions_scored" in n
+        or "_scored.csv" in n
+        or "alarm_feed" in n
+        or n.endswith("events.csv")
+        or n.endswith("event_summary.csv")
+    )
+
+
+def _collect_metric_report_paths(outputs_dir: Path) -> list[tuple[str, Path]]:
+    """Eğitim JSON + bilinen CSV raporları (+ diğer küçük csv'ler)."""
+    items: list[tuple[str, Path]] = []
+    if not outputs_dir.is_dir():
+        return items
+    seen: set[str] = set()
+
+    def add(label: str, path: Path) -> None:
+        sp = path.resolve()
+        key = str(sp)
+        if key not in seen:
+            seen.add(key)
+            items.append((label, path))
+
+    for x in sorted(outputs_dir.glob("metrics_*.json")):
+        add(f"[JSON] {x.name}", x)
+
+    csv_priority_patterns = ("robustness*.csv", "ablation*.csv", "improve*.csv")
+    for pat in csv_priority_patterns:
+        for x in sorted(outputs_dir.glob(pat)):
+            if x.is_file():
+                add(f"[CSV] {x.name}", x)
+
+    for x in sorted(outputs_dir.glob("*.csv")):
+        if x.is_file() and str(x.resolve()) not in seen and not _infer_video_output_csv(x.name):
+            add(f"[CSV] {x.name}", x)
+
+    items.sort(key=lambda t: (t[0].split("]", 1)[0], str(t[1]).lower()))
+    return items
+
+
 def _render_review_tab() -> None:
     csv_path = st.text_input("CSV dosya yolu", "outputs/video_predictions_scored.csv", key="rev_csv")
     if not os.path.exists(csv_path):
@@ -545,33 +589,119 @@ def _render_review_tab() -> None:
 
 
 def _render_metrics_tab() -> None:
-    outputs_dir = st.text_input("Outputs klasörü", "outputs", key="met_dir")
-    p = Path(outputs_dir)
-    metric_files = sorted([x for x in p.glob("metrics_*.json")]) if p.exists() else []
-    if not metric_files:
-        st.warning("`metrics_*.json` bulunamadı.")
-        return
-    selected = st.selectbox("Metrik dosyası", [str(x) for x in metric_files])
-    payload = json.loads(Path(selected).read_text(encoding="utf-8"))
-    rows = []
-    for split in ("val", "test"):
-        d = payload.get(split, {})
-        if isinstance(d, dict):
-            rows.append(
-                {
-                    "Bölüm": split,
-                    "Doğruluk": d.get("acc"),
-                    "AUC": d.get("auc"),
-                    "Kesinlik": d.get("precision"),
-                    "Yangını kaçırmama": d.get("recall"),
-                    "F1": d.get("f1"),
-                }
-            )
-    if rows:
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
     st.caption(
-        "_Yangını kaçırmama oranı: modelin gerçek yangınları ne kadar yakaladığıdır "
-        "(teknik adıyla duyarlılık / recall)._"
+        "`final_candidates.zip` içindeki dosyaları bir klasöre çıkarın ve o klasörün yolunu girin; "
+        "veyen **CSV / JSON** doğrudan yükleyin."
+    )
+    outputs_dir_str = st.text_input(
+        "Çıktı klasörü (örn. `outputs` veya çıkarılmış `final_candidates`)",
+        "outputs",
+        key="met_dir",
+    )
+    p = Path(outputs_dir_str.strip())
+    uploads = st.file_uploader(
+        "Dosya yükle (tablo olarak)",
+        type=["csv", "json"],
+        key="metrics_file_upload",
+        accept_multiple_files=False,
+    )
+
+    if uploads is not None:
+        up_name = uploads.name or "upload"
+        try:
+            if up_name.lower().endswith(".json"):
+                payload = json.loads(uploads.getvalue().decode("utf-8", errors="replace"))
+                st.markdown(f"**{up_name}**")
+                rows = []
+                for split in ("val", "test"):
+                    d = payload.get(split, {})
+                    if isinstance(d, dict) and any(v is not None for v in d.values()):
+                        rows.append(
+                            {
+                                "Bölüm": split,
+                                "Doğruluk": d.get("acc"),
+                                "AUC": d.get("auc"),
+                                "Kesinlik": d.get("precision"),
+                                "Yangını kaçırmama": d.get("recall"),
+                                "F1": d.get("f1"),
+                            }
+                        )
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                else:
+                    st.json(dict(list(payload.items())[:100]))
+                return
+
+            df = pd.read_csv(uploads)
+            st.markdown(f"**{up_name}** · {len(df)} satır × {df.shape[1]} sütun")
+            _h = min(620, max(360, min(len(df), 25) * 28))
+            try:
+                st.dataframe(df, use_container_width=True, height=_h)
+            except TypeError:
+                st.dataframe(df, use_container_width=True)
+            return
+        except Exception as e:
+            st.error(f"Dosya okunamadı: {type(e).__name__}: {e}")
+            return
+
+    choices = _collect_metric_report_paths(p)
+    if not choices:
+        st.warning(
+            f"`{p}` içinde rapor bulunamadı. **Zip’i çıkarıp** doğru klasör yolunu yazın veya üstten dosya yükleyin."
+        )
+        return
+
+    labels = [c[0] for c in choices]
+    selected_label = st.selectbox("Dosya seç", labels, index=0)
+    sel_path = next(path for lbl, path in choices if lbl == selected_label)
+
+    st.markdown(f"**{sel_path.name}** • `{sel_path.resolve()}`")
+
+    if sel_path.suffix.lower() == ".json":
+        try:
+            payload = json.loads(sel_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            st.error(str(e))
+            return
+        rows = []
+        for split in ("val", "test"):
+            d = payload.get(split, {})
+            if isinstance(d, dict) and len(d):
+                rows.append(
+                    {
+                        "Bölüm": split,
+                        "Doğruluk": d.get("acc"),
+                        "AUC": d.get("auc"),
+                        "Kesinlik": d.get("precision"),
+                        "Yangını kaçırmama": d.get("recall"),
+                        "F1": d.get("f1"),
+                    }
+                )
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        extras = [{"Alan": k, "Değer": payload[k]} for k in ("epoch", "mode", "model_family", "threshold") if k in payload]
+        if extras:
+            with st.expander("Ek alanlar"):
+                st.dataframe(pd.DataFrame(extras), use_container_width=True)
+        if not rows:
+            st.caption("`val`/`test` blokları yok; ham JSON (kısaltılmış).")
+            st.json(dict(list(payload.items())[:100]))
+    else:
+        try:
+            df = pd.read_csv(sel_path, encoding="utf-8")
+        except UnicodeDecodeError:
+            df = pd.read_csv(sel_path, encoding="latin-1")
+        if len(df) > 8000:
+            st.warning(f"Çok fazla satır ({len(df)}); ilk **8000** gösteriliyor.")
+            df = df.iloc[:8000]
+        _h = min(620, max(360, min(len(df), 25) * 28))
+        try:
+            st.dataframe(df, use_container_width=True, height=_h)
+        except TypeError:
+            st.dataframe(df, use_container_width=True)
+
+    st.caption(
+        "**Yangını kaçırmama** = duyarlılık (recall). Video çıkarım CSV’leri bu listeden bilinçli olarak çıkarılmıştır."
     )
 
 
@@ -624,10 +754,11 @@ def main() -> None:
                 if st.button("← Yeni analiz", type="secondary"):
                     st.session_state["fire_analysis_cfg"] = None
                     st.session_state["fire_analysis_result"] = None
-                if "fire_preview_frame_idx" in st.session_state:
-                    del st.session_state["fire_preview_frame_idx"]
+                    if "fire_preview_frame_idx" in st.session_state:
+                        del st.session_state["fire_preview_frame_idx"]
                     st.rerun()
-                _render_analysis_dashboard(cfg, res)
+                else:
+                    _render_analysis_dashboard(cfg, res)
 
         st.caption(
             "Kurumsal kullanımda daha zengin arayüz için ileride **FastAPI + React** ile "
