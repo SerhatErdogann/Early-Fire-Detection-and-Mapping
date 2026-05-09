@@ -124,8 +124,8 @@ Kaggle’da yolları `/kaggle/working/outputs/...` ve `/kaggle/working/models/..
 - **Sınıf dengesi:** `--loss_mode balanced_sampler` + `WeightedRandomSampler`; `cb_focal` vb.
 - **Bölme & sızıntı:** `split_group`; `flame_video_nofire` pair politikası README’deki özetle uyumlu. İndeks değişiminden sonra `scripts/check_leakage.py`.
 - **Source-aware eşik:** Trainer val/test için kaynak bazlı eşik taraması ve JSON/checkpoint içi meta.
-- **Augmentation:** Sadece train loader.
-- **Robustness/ablation:** Sadece offline eval modülleri.
+- **Augmentation:** Yalnızca **train** loader’da (RGB jitter/blur/erase; termal fotoğrafik + random patch). **Train’de** termal tensöre **Gaussian additive noise uygulanmaz** (temiz öğrenme yüzeyi).
+- **Gaussian gürültü — sadece offline test:** `robustness_eval.py` (RGB/thermal Gaussian sweep) ve `ablation_eval.py` içindeki `*_gauss_noise` koşulları **val/test verisine forward sırasında** eklenir; trainer DataLoader’ına karışmaz.
 
 ## Robustness CLI (offline)
 
