@@ -30,7 +30,7 @@ from src.ui.reporting import (
 from src.ui.result_panel import render_live_panel, turkish_caption_for_row
 from src.ui.styles import inject_global_styles
 from src.ui.video_helpers import nearest_row_by_frame
-from src.ui.video_panel import render_frame_cards, render_live_frame_preview
+from src.ui.video_panel import render_frame_cards, render_preview_with_frame_arrows
 
 try:
     from config import (
@@ -326,6 +326,14 @@ def _render_analysis_dashboard(
     if sel_key not in st.session_state:
         st.session_state[sel_key] = int(_default_preview_frame(df_events, df_scored))
 
+    col_vid, col_stat = st.columns([1.2, 1.0])
+    with col_vid:
+        render_preview_with_frame_arrows(
+            rgb_path if exists_or_stream else None,
+            df_scored,
+            session_key_selected=sel_key,
+        )
+
     raw_fi = int(st.session_state[sel_key])
     row_live = nearest_row_by_frame(df_scored, raw_fi)
     if row_live is None:
@@ -341,9 +349,6 @@ def _render_analysis_dashboard(
 
     cap = turkish_caption_for_row(prob_raw, alarm_e, inceleme_e, slope, st_al or None)
 
-    col_vid, col_stat = st.columns([1.2, 1.0])
-    with col_vid:
-        render_live_frame_preview(rgb_path if exists_or_stream else None, raw_fi, df_scored)
     with col_stat:
         render_live_panel(prob_raw, alarm_e, inceleme_e, st_al or None, cap)
 

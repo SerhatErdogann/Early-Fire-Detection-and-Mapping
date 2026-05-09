@@ -31,6 +31,80 @@ def render_live_frame_preview(
         st.warning("Bu konum için kare okunamadı.")
 
 
+def render_preview_with_frame_arrows(
+    rgb_path: str | None,
+    df_scored: pd.DataFrame | None,
+    *,
+    session_key_selected: str,
+) -> None:
+    """Çıktı kare sırasına göre ◀ ▶ ile gezinme (analiz tablosundaki ``frame_idx`` sırası)."""
+    if not rgb_path:
+        st.warning("Önizleme için video yolu yok.")
+        return
+    if df_scored is None or df_scored.empty or "frame_idx" not in df_scored.columns:
+        render_live_frame_preview(rgb_path, 0, df_scored)
+        return
+
+    idx_series = pd.to_numeric(df_scored["frame_idx"], errors="coerce").dropna().astype(int)
+    seq = sorted(idx_series.unique().tolist())
+    if not seq:
+        render_live_frame_preview(rgb_path, 0, df_scored)
+        return
+
+    safe = "".join(ch if ch.isalnum() else "_" for ch in session_key_selected)
+    nav_prev = f"nav_prev_{safe}"
+    nav_next = f"nav_next_{safe}"
+
+    if session_key_selected not in st.session_state:
+        st.session_state[session_key_selected] = int(seq[0])
+
+    cur = int(st.session_state[session_key_selected])
+    if cur not in seq:
+        snapped = seq[min(range(len(seq)), key=lambda i: abs(seq[i] - cur))]
+        st.session_state[session_key_selected] = snapped
+        cur = snapped
+    pos = seq.index(cur)
+
+    c_left, c_mid, c_right = st.columns([0.1, 0.72, 0.1])
+
+    with c_left:
+        go_prev = st.button(
+            "◀",
+            key=nav_prev,
+            help="Önceki analiz karesi",
+            disabled=pos <= 0,
+            use_container_width=True,
+        )
+
+    with c_right:
+        go_next = st.button(
+            "▶",
+            key=nav_next,
+            help="Sonraki analiz karesi",
+            disabled=pos >= len(seq) - 1,
+            use_container_width=True,
+        )
+
+    if go_prev and pos > 0:
+        st.session_state[session_key_selected] = int(seq[pos - 1])
+    if go_next and pos < len(seq) - 1:
+        st.session_state[session_key_selected] = int(seq[pos + 1])
+
+    cur = int(st.session_state[session_key_selected])
+    if cur not in seq:
+        snapped = seq[min(range(len(seq)), key=lambda i: abs(seq[i] - cur))]
+        st.session_state[session_key_selected] = snapped
+        cur = snapped
+    pos = seq.index(cur)
+
+    with c_mid:
+        render_live_frame_preview(rgb_path, cur, df_scored)
+
+    st.caption(
+        f"Analiz sırasında **{pos + 1} / {len(seq)}** kayıt — **kare {cur}** (◀ ▶ çıktı sırasına göre ilerler)"
+    )
+
+
 def render_frame_cards(
     df_scored: pd.DataFrame,
     rgb_path: str,
