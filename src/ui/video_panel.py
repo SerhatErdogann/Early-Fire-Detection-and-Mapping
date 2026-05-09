@@ -29,3 +29,50 @@ def render_live_frame_preview(
         st.markdown(f"<p style='margin-top:0.35rem;color:#b8c5d9;font-weight:600'>{time_str}</p>", unsafe_allow_html=True)
     else:
         st.warning("Bu konum için kare okunamadı.")
+
+
+def render_frame_cards(
+    df_scored: pd.DataFrame,
+    rgb_path: str,
+    prob_col: str,
+    *,
+    session_key_selected: str,
+    max_cards: int = 48,
+) -> None:
+    """Teknik görünüm: küçük kare özetleri — tıklanınca önizleme çerçevesi seçilir."""
+    n = len(df_scored)
+    if n == 0:
+        return
+
+    if session_key_selected not in st.session_state:
+        st.session_state[session_key_selected] = int(df_scored["frame_idx"].iloc[0])
+
+    step = max(1, int((n + max_cards - 1) // max_cards))
+    row_indices = list(range(0, n, step))[:max_cards]
+
+    st.caption("Kare özetleri (teknik) — karta tıklayın veya listeden seçin.")
+
+    cols = st.columns(4)
+    for i, di in enumerate(row_indices):
+        row = df_scored.iloc[di]
+        fi = int(row["frame_idx"])
+        p = float(row[prob_col]) if prob_col in row.index else 0.0
+        im = read_frame_rgb(rgb_path, fi) if rgb_path else None
+        with cols[i % 4]:
+            if im is not None:
+                st.image(im, use_container_width=True)
+            ts = float(row["timestamp_sec"]) if "timestamp_sec" in row.index else 0.0
+            label = f"%{100.0 * min(p, 0.97):.0f} · {ts:.1f}s\n#{fi}"
+            if p > 0.97:
+                label = f">97% · {ts:.1f}s\n#{fi}"
+            if st.button(label, key=f"fc_{session_key_selected}_{fi}", use_container_width=True):
+                st.session_state[session_key_selected] = fi
+                st.rerun()
+
+    sample_ids = [int(df_scored.iloc[i]["frame_idx"]) for i in row_indices]
+    cur = int(st.session_state[session_key_selected])
+    if cur not in sample_ids:
+        sample_ids = sorted(set(sample_ids + [cur]))
+    idx_default = min(range(len(sample_ids)), key=lambda j: abs(sample_ids[j] - cur))
+    pick = st.selectbox("Özet listeden kare", options=sample_ids, index=idx_default)
+    st.session_state[session_key_selected] = int(pick)
