@@ -12,14 +12,14 @@ def classify_ui_status(
     alarm_state: str | None,
 ) -> tuple[str, str, str]:
     """
-    Returns (title, badge_label, kind) for components.render_status_header kind in ok|warn|danger.
+    Returns (kullanıcı_başlığı, kısa_etiket, kind) for styling; kind in ok|warn|danger.
     """
     st_al = (alarm_state or "").lower()
     if st_al == "confirmed" or prob >= float(alarm_esigi):
-        return "Yangın Var", "Kırmızı: Yangın riski", "danger"
+        return "Yangın riski yüksek", "Üst düzey uyarı", "danger"
     if prob >= float(inceleme_esigi) or st_al in ("suspected",):
-        return "İnceleme Gerekli", "Sarı: İnceleme", "warn"
-    return "Yangın Yok", "Yeşil: Güvenli", "ok"
+        return "İnceleme gerekli", "Dikkat — kontrol edin", "warn"
+    return "Yangın yok", "Güvenli bölge", "ok"
 
 
 def turkish_caption_for_row(

@@ -28,7 +28,7 @@ def render_status_header(
     card_begin()
     bhtml = badge_html(status_label, kind)
     st.markdown(
-        f'<p class="fire-subtle" style="margin:0">Anlık yangın olasılığı</p>'
+        f'<p class="fire-subtle" style="margin:0">Yangın olasılığı (tahmini)</p>'
         f'<p class="fire-prob-massive" style="color:#eee">%{prob_pct:.0f}</p>'
         f'<p style="margin:0.25rem 0 0 0">{bhtml}</p>'
         f'<p style="margin:0.6rem 0 0 0; font-weight:600; font-size:1.05rem">{title}</p>',

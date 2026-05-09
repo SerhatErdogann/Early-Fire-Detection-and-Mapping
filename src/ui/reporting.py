@@ -113,16 +113,18 @@ def build_final_report(
     if "alarm_state" in df_scored.columns:
         confirmed = bool((df_scored["alarm_state"].astype(str) == "confirmed").any())
 
-    # Verdict: red if confirmed or many fire frames or events
-    if confirmed or alarm_events > 0 or (fire_frames > 0 and mx >= float(hyst_high)):
+    has_fire_event = bool((df_scored["fire_event"].astype(int) == 1).any()) if "fire_event" in df_scored.columns else False
+
+    # Final özet tek kare ile kırmızıya sıçramasın — teyit / olay süreleri öncelikli.
+    if confirmed or alarm_events > 0 or has_fire_event:
         verdict_key = "fire"
-        verdict_tr = "Yangın Var"
+        verdict_tr = "Yangın riski yüksek"
     elif mx >= float(hyst_low) or fire_frames > 0:
         verdict_key = "review"
-        verdict_tr = "İnceleme Gerekli"
+        verdict_tr = "İnceleme gerekli"
     else:
         verdict_key = "safe"
-        verdict_tr = "Yangın Yok"
+        verdict_tr = "Yangın yok"
 
     high_segs, _ = alarm_time_segments(
         df_scored,

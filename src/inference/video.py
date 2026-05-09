@@ -1,5 +1,8 @@
 """
 Video inference with optional EMA smoothing and TTA for more stable predictions on drone footage.
+
+Production path keeps **temporal** behaviour: moving-window blend, EMA, and (when ``temporal_guard`` is on)
+alarm state machine persistence so a **single spiky frame** alone should not read as a sustained ``confirmed`` alarm.
 """
 from __future__ import annotations
 

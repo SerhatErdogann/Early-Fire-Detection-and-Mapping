@@ -153,7 +153,7 @@ def _render_home(
     preset = preset_map[preset_key]
     st.caption(f"_{preset.description}_")
 
-    ckpt_choice = st.selectbox("Model dosyası (ağırlık)", options=ckpt_options, index=0)
+    ckpt_choice = st.selectbox("Hazır kalibre model seçin", options=ckpt_options, index=0)
     if not Path(ckpt_choice).is_file():
         st.warning(
             f"Seçilen dosya bulunamadı: `{ckpt_choice}`. "
@@ -323,11 +323,11 @@ def _render_analysis_dashboard(
     st.subheader("Özet rapor")
     v_kind = report.verdict_key
     badge = (
-        "🔴 Yangın riski"
+        "🔴 Yangın riski yüksek"
         if v_kind == "fire"
-        else "🟡 İnceleme"
+        else "🟡 İnceleme gerekli"
         if v_kind == "review"
-        else "🟢 Yangın yok (model)"
+        else "🟢 Yangın yok"
     )
     st.markdown(f"**Genel sonuç:** {report.verdict_tr} &nbsp; {badge}")
     render_metric_row(
@@ -340,7 +340,7 @@ def _render_analysis_dashboard(
     )
     st.markdown(f"**İnceleme eşiği:** {report.inceleme_esigi:.3f}")
     if report.alarm_zaman_araliklari:
-        st.markdown("**Yüksek uyarı zaman aralıkları (yaklaşık):**")
+        st.markdown("**Alarm için öne çıkan zaman aralıkları:**")
         for a, b in report.alarm_zaman_araliklari:
             st.write(f"- {a:.2f} s – {b:.2f} s")
     else:
