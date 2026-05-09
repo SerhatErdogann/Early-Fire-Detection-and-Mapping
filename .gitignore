@@ -3,22 +3,55 @@ __pycache__/
 **/__pycache__/
 *.pyc
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# Logs / temp / debug artifacts
+*.log
+**/logs/
+tmp/
+temp/
+**/tmp/
+**/temp/
+debug_out/
+wandb/
+
+# Hugging Face / generic caches (local + CI)
+.cache/
+**/.cache/
+.huggingface/
 
 # Data / artifacts (large) — root only, NOT src/data/ (Python modules)
 /data/
 /data.rar
 /outputs/
 
+# Optional UI demo clips — ignore binaries; allow a tracked empty placeholder
+/samples/*
+!/samples/.gitkeep
+
 # Models (can be large) — root models/ folder
 /models/
 *.pt
 *.h5
+*.safetensors
 
 # Code archives (we don't ship zipped source in the repo)
 *.zip
+
+# Scratch / local encodes (prefer paths over blanket media ignores)
+scratch_videos/
+upload_temp/
 
 # OS / editor
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+
+# Streamlit (local secrets)
+.streamlit/secrets.toml
