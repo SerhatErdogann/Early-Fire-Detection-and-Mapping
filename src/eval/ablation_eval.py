@@ -22,6 +22,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.data import FlameDataset  # noqa: E402
 from src.data.path_filter import filter_df_existing_paths  # noqa: E402
+from src.eval.thermal_calibration import (  # noqa: E402
+    resolve_thermal_calibration_or_exit,
+    thermal_norm_from_checkpoint,
+)
 from src.models import make_classifier  # noqa: E402
 from src.training.metrics import metrics_at_threshold  # noqa: E402
 
@@ -56,6 +60,9 @@ def run_ablation(
     split: str,
     bs: int = 16,
     out_csv: str | Path = "outputs/ablation_eval.csv",
+    thermal_mu: float | None = None,
+    thermal_sigma: float | None = None,
+    metrics_json: str | None = None,
 ) -> pd.DataFrame:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ck = _load_ckpt(ckpt_path, device)
@@ -76,13 +83,22 @@ def run_ablation(
     if dropped:
         print(f"[ablation] dropped {dropped} missing-file rows")
 
-    thermal_norm = "percentile"
-    ta = ck.get("training_args") if isinstance(ck.get("training_args"), dict) else {}
-    tn = ta.get("thermal_norm")
-    if isinstance(tn, str) and tn.strip():
-        thermal_norm = tn.strip()
+    thermal_norm = thermal_norm_from_checkpoint(ck)
+    th_mu, th_sigma = resolve_thermal_calibration_or_exit(
+        ck=ck,
+        thermal_norm=thermal_norm,
+        cli_mu=thermal_mu,
+        cli_sigma=thermal_sigma,
+        metrics_json=metrics_json,
+        prog="python -m src.eval.ablation_eval",
+    )
 
-    ds = FlameDataset(df, mode="fusion", size=size, train=False, thermal_norm=thermal_norm)
+    ds_kw: dict = dict(mode="fusion", size=size, train=False, thermal_norm=thermal_norm)
+    if th_mu is not None:
+        ds_kw["thermal_mu"] = th_mu
+        ds_kw["thermal_sigma"] = float(th_sigma)
+
+    ds = FlameDataset(df, **ds_kw)
     dl = DataLoader(ds, batch_size=bs, shuffle=False, num_workers=0)
 
     model = make_classifier(mf, backbone, "fusion", num_classes=2, pretrained=False, thermal_init="mean_rgb")
@@ -143,6 +159,8 @@ def run_ablation(
                 "csv": csv_path,
                 "split": split,
                 "thermal_norm_ds": thermal_norm,
+                "thermal_mu": th_mu,
+                "thermal_sigma": th_sigma,
                 "n": int(len(y_arr)),
                 "suite": [r[0] for r in suites],
                 "note_rgb_only": (
@@ -166,6 +184,23 @@ def main() -> int:
     ap.add_argument("--split", default="test", choices=["val", "test", "all"])
     ap.add_argument("--bs", type=int, default=16)
     ap.add_argument("--out", default="outputs/ablation_eval.csv")
+    ap.add_argument(
+        "--metrics_json",
+        default=None,
+        help="Optional outputs/metrics_*.json to read thermal_mu/sigma (train_zscore).",
+    )
+    ap.add_argument(
+        "--thermal_mu",
+        type=float,
+        default=None,
+        help="Override thermal mean (with --thermal_sigma) for train_zscore / global_zscore.",
+    )
+    ap.add_argument(
+        "--thermal_sigma",
+        type=float,
+        default=None,
+        help="Override thermal std (with --thermal_mu) for train_zscore / global_zscore.",
+    )
     args = ap.parse_args()
     run_ablation(
         ckpt_path=args.ckpt,
@@ -173,6 +208,9 @@ def main() -> int:
         split=args.split,
         bs=int(args.bs),
         out_csv=args.out,
+        thermal_mu=args.thermal_mu,
+        thermal_sigma=args.thermal_sigma,
+        metrics_json=args.metrics_json,
     )
     return 0
 

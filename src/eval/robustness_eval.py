@@ -21,6 +21,10 @@ Usage example:
         --severities 1,2,3 \\
         --out outputs/robustness_eval.csv
 
+For checkpoints trained with ``--thermal_norm train_zscore``, ``thermal_mu`` and
+``thermal_sigma`` are read from the checkpoint and/or ``outputs/metrics_*.json``.
+Override with ``--thermal_mu`` / ``--thermal_sigma`` or ``--metrics_json`` if needed.
+
 The output CSV has one row per (corruption, severity) and reports
 ``n``, ``acc``, ``bal_acc``, ``f1``, ``recall``, ``precision``,
 ``specificity``, ``false_positive_rate``, ``auc``, ``ap`` evaluated at the
@@ -46,6 +50,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.data import FlameDataset  # noqa: E402
 from src.data.path_filter import filter_df_existing_paths  # noqa: E402
+from src.eval.thermal_calibration import (  # noqa: E402
+    resolve_thermal_calibration_or_exit,
+    thermal_norm_from_checkpoint,
+)
 from src.models import make_classifier  # noqa: E402
 from src.training.metrics import metrics_at_threshold  # noqa: E402
 
@@ -300,6 +308,9 @@ def run_robustness(
     temperature_override: float | None = None,
     threshold_override: float | None = None,
     seed: int = 0,
+    thermal_mu: float | None = None,
+    thermal_sigma: float | None = None,
+    metrics_json: str | None = None,
 ) -> pd.DataFrame:
     """Run the full robustness sweep and (optionally) write a CSV."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -330,13 +341,30 @@ def run_robustness(
     else:
         sev_list = [int(s) for s in severities if 1 <= int(s) <= 3]
 
+    thermal_norm = thermal_norm_from_checkpoint(ck)
+    th_mu, th_sigma = resolve_thermal_calibration_or_exit(
+        ck=ck,
+        thermal_norm=thermal_norm,
+        cli_mu=thermal_mu,
+        cli_sigma=thermal_sigma,
+        metrics_json=metrics_json,
+        prog="python -m src.eval.robustness_eval",
+    )
+
     print(
         f"[robustness] ckpt={ckpt_path} mode={info['mode']} family={info['family']} "
-        f"backbone={info['backbone']} size={info['size']} threshold={threshold:.3f} T={temperature:.3f}"
+        f"backbone={info['backbone']} size={info['size']} threshold={threshold:.3f} T={temperature:.3f} "
+        f"thermal_norm={thermal_norm!r}"
     )
     print(f"[robustness] split={split} n={len(df_split)} corruptions={corr_names} severities={sev_list}")
 
-    ds = FlameDataset(df_split.reset_index(drop=True), mode=info["mode"], size=info["size"], train=False)
+    ds_kw: dict = dict(
+        mode=info["mode"], size=info["size"], train=False, thermal_norm=thermal_norm
+    )
+    if th_mu is not None:
+        ds_kw["thermal_mu"] = th_mu
+        ds_kw["thermal_sigma"] = float(th_sigma)
+    ds = FlameDataset(df_split.reset_index(drop=True), **ds_kw)
     loader = DataLoader(
         ds,
         batch_size=int(bs),
@@ -382,6 +410,9 @@ def run_robustness(
                     "model_info": info,
                     "threshold_used": threshold,
                     "temperature_used": temperature,
+                    "thermal_norm_ds": thermal_norm,
+                    "thermal_mu": th_mu,
+                    "thermal_sigma": th_sigma,
                     "corruptions": corr_names,
                     "severities": sev_list,
                     "n_rows": int(len(df_split)),
@@ -422,6 +453,23 @@ def main() -> int:
     ap.add_argument("--temperature", type=float, default=None, help="Override calibration T (default: from ckpt).")
     ap.add_argument("--threshold", type=float, default=None, help="Override decision threshold (default: from ckpt).")
     ap.add_argument("--seed", type=int, default=0, help="RNG seed for reproducible noise.")
+    ap.add_argument(
+        "--metrics_json",
+        default=None,
+        help="Optional outputs/metrics_*.json path to read thermal_mu/sigma (train_zscore).",
+    )
+    ap.add_argument(
+        "--thermal_mu",
+        type=float,
+        default=None,
+        help="Override thermal mean for train_zscore / global_zscore (use with --thermal_sigma).",
+    )
+    ap.add_argument(
+        "--thermal_sigma",
+        type=float,
+        default=None,
+        help="Override thermal std for train_zscore / global_zscore (use with --thermal_mu).",
+    )
     args = ap.parse_args()
 
     run_robustness(
@@ -437,6 +485,9 @@ def main() -> int:
         temperature_override=args.temperature,
         threshold_override=args.threshold,
         seed=int(args.seed),
+        thermal_mu=args.thermal_mu,
+        thermal_sigma=args.thermal_sigma,
+        metrics_json=args.metrics_json,
     )
     return 0
 

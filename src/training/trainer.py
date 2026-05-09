@@ -1362,6 +1362,12 @@ def train_one_run(
                         "thermal_lr_mult": float(thermal_lr_mult),
                         "modal_dropout_p": float(modal_dropout_p),
                         "thermal_norm": str(thermal_norm),
+                        "thermal_mu": (
+                            float(thermal_mu_es) if thermal_mu_es is not None else None
+                        ),
+                        "thermal_sigma": (
+                            float(thermal_sig_es) if thermal_sig_es is not None else None
+                        ),
                         "rgb_aug_intensity": float(rgb_aug_intensity),
                         "thermal_aug_intensity": float(thermal_aug_intensity),
                         "gate_entropy_weight": float(gate_entropy_weight),
@@ -1415,6 +1421,11 @@ def train_one_run(
             metrics = {
                 "mode": mode,
                 "model_family": mf,
+                "thermal_norm": str(thermal_norm),
+                "thermal_mu": float(thermal_mu_es) if thermal_mu_es is not None else None,
+                "thermal_sigma": (
+                    float(thermal_sig_es) if thermal_sig_es is not None else None
+                ),
                 "epoch": ep,
                 "threshold": float(best_thr),
                 "threshold_alarm": float(thr_alarm),
