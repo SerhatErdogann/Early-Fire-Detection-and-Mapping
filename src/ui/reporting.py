@@ -166,14 +166,12 @@ def build_markdown_report(
     *,
     model_path: str,
     video_name: str,
-    analiz_modu: str,
     prob_col: str,
 ) -> str:
     lines = [
         "# Yangın video analiz özeti",
         "",
         f"- **Video:** `{video_name}`",
-        f"- **Analiz modu:** {analiz_modu}",
         f"- **Model dosyası:** `{model_path}`",
         "",
         "## Genel karar",

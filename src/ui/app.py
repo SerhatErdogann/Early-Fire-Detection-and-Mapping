@@ -17,7 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.ui.components import render_metric_row
-from src.ui.constants import PRESETS
+from src.ui.constants import DEFAULT_INFER_UI_ARGS
 from src.ui.inference_runner import run_analysis_pipeline
 from src.ui.reporting import (
     FinalReport,
@@ -141,18 +141,6 @@ def _render_home(
     up_th = st.file_uploader("Termal video (isteğe bağlı)", type=["mp4", "avi", "mov", "mkv", "webm"])
     th_path_input = st.text_input("Termal: yerel path veya URI (isteğe bağlı)", "")
 
-    st.subheader("Analiz hassasiyeti")
-    preset_map = {p.key: p for p in PRESETS}
-    preset_key = st.radio(
-        "",
-        options=[p.key for p in PRESETS],
-        format_func=lambda k: preset_map[k].title,
-        horizontal=True,
-        label_visibility="collapsed",
-    )
-    preset = preset_map[preset_key]
-    st.caption(f"_{preset.description}_")
-
     ckpt_choice = st.selectbox("Hazır kalibre model seçin", options=ckpt_options, index=0)
     if not Path(ckpt_choice).is_file():
         st.warning(
@@ -192,7 +180,7 @@ def _render_home(
         cfg = {
             "rgb_path": rgb_path,
             "th_path": th_path,
-            "preset": preset,
+            "infer_args": dict(DEFAULT_INFER_UI_ARGS),
             "ckpt": ckpt_choice,
             "out_base": out_base,
         }
@@ -223,7 +211,7 @@ def _run_with_progress(
     res = run_analysis_pipeline(
         cfg["rgb_path"],
         cfg["th_path"],
-        cfg["preset"].args,
+        cfg["infer_args"],
         cfg["ckpt"],
         out_dir,
         progress_callback=cb,
@@ -366,7 +354,6 @@ def _render_analysis_dashboard(
         report,
         model_path=str(cfg["ckpt"]),
         video_name=Path(rgb_path).name,
-        analiz_modu=str(cfg["preset"].title),
         prob_col=prob_col,
     )
     st.download_button(
@@ -417,7 +404,7 @@ def _render_debug(cfg: dict[str, Any], result: dict[str, Any]) -> None:
                 "hyst_high_used": result.get("hyst_high_used"),
                 "hyst_low_used": result.get("hyst_low_used"),
                 "out_files": {k: result[k] for k in ("pred_csv", "scored_csv", "events_csv", "benchmark_json") if k in result},
-                "preset": getattr(cfg.get("preset"), "key", ""),
+                "infer_profile": "default",
             }
         )
         if Path(str(result.get("benchmark_json", ""))).is_file():

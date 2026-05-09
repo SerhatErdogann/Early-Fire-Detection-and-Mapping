@@ -1,92 +1,35 @@
-"""UI constants: inference presets for the Streamlit dashboard."""
+"""Streamlit UI için tek varsayılan video çıkarım profili (ayar seçici yok)."""
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
-
-
-@dataclass(frozen=True)
-class InferPreset:
-    key: str
-    title: str
-    description: str
-    args: dict[str, Any]
-
 
 try:
     from config import INFERENCE_DEFAULT
 except Exception:  # pragma: no cover
     INFERENCE_DEFAULT = {}
 
+# Streamlit varsayılan çıkarım argümanları (tek profil; CLI farklı parametre kullanabilir).
+DEFAULT_INFER_UI_ARGS: dict[str, Any] = {
+    "size": 224,
+    "step": 6,
+    "smooth_win": 7,
+    "ema_alpha": 0.30,
+    "tta": True,
+    "fp16": True,
+    "adaptive_step": True,
+    "adaptive_min_step": 2,
+    "adaptive_max_step": 12,
+    "temporal_guard": True,
+    "min_component_area": float(INFERENCE_DEFAULT.get("min_component_area", 0.01) or 0.01),
+    "texture_prob_max": float(INFERENCE_DEFAULT.get("texture_prob_max", 0.2) or 0.2),
+    "small_fire_boost": float(INFERENCE_DEFAULT.get("small_fire_boost", 1.3) or 1.3),
+    "growth_upscale": float(INFERENCE_DEFAULT.get("growth_upscale", 1.2) or 1.2),
+    "prob_temporal_blend": 0.2,
+    "burst_min_frames": 3,
+    "burst_threshold_frac": 1.0,
+    "auto_step_long_video": True,
+    "stream_buffer_reduce": True,
+}
 
-PRESETS: list[InferPreset] = [
-    InferPreset(
-        key="fast",
-        title="Hızlı analiz",
-        description="Uzun videolarda daha seyrek örnekleme; sonuç hızlı gelir, ince ayrıntı kaçabilir.",
-        args={
-            "size": 224,
-            "step": 10,
-            "smooth_win": 5,
-            "ema_alpha": 0.25,
-            "tta": False,
-            "fp16": True,
-            "adaptive_step": True,
-            "adaptive_min_step": 2,
-            "temporal_guard": True,
-            "min_component_area": 0.0,
-            "texture_prob_max": 0.0,
-            "small_fire_boost": 1.0,
-            "growth_upscale": 1.0,
-            "prob_temporal_blend": 0.0,
-            "burst_min_frames": 3,
-            "burst_threshold_frac": 1.0,
-            "auto_step_long_video": True,
-            "stream_buffer_reduce": True,
-        },
-    ),
-    InferPreset(
-        key="balanced",
-        title="Dengeli analiz",
-        description="Günlük kullanım için önerilen denge. Yüksek riskte adaptif adım en az 2 kare tutulur (CPU’da ~2× hız); detay için “Detaylı analiz”.",
-        args={
-            "size": 224,
-            "step": 6,
-            "smooth_win": 7,
-            "ema_alpha": 0.30,
-            "tta": True,
-            "fp16": True,
-            "adaptive_step": True,
-            "adaptive_min_step": 2,
-            "temporal_guard": True,
-            "min_component_area": float(INFERENCE_DEFAULT.get("min_component_area", 0.01) or 0.01),
-            "prob_temporal_blend": 0.2,
-            "burst_min_frames": 3,
-            "burst_threshold_frac": 1.0,
-            "auto_step_long_video": True,
-            "stream_buffer_reduce": True,
-        },
-    ),
-    InferPreset(
-        key="safe",
-        title="Detaylı analiz",
-        description="Daha büyük giriş ve daha sık örnekleme; yüksek riskte her kare işlenebilir — CPU’da çok uzun sürebilir.",
-        args={
-            "size": 384,
-            "step": 4,
-            "smooth_win": 9,
-            "ema_alpha": 0.35,
-            "tta": True,
-            "fp16": False,
-            "adaptive_step": True,
-            "adaptive_min_step": 1,
-            "temporal_guard": True,
-            "min_component_area": float(INFERENCE_DEFAULT.get("min_component_area", 0.01) or 0.01),
-            "prob_temporal_blend": 0.25,
-            "burst_min_frames": 4,
-            "burst_threshold_frac": 1.0,
-            "auto_step_long_video": True,
-            "stream_buffer_reduce": True,
-        },
-    ),
-]
+
+__all__ = ["DEFAULT_INFER_UI_ARGS"]
