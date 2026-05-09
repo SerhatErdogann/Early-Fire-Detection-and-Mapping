@@ -429,6 +429,10 @@ def run_video_inference(
         hot_frac = float(np.mean((small_gray > 0.85).astype(np.float32)))
         pix_mae = float(mae_scene if prev_gray is not None else 1.0)
         mono_now = float(time.monotonic())
+        gray_corr_prev = None
+        if prev_gray is not None:
+            _gc = _safe_corr2d(small_gray.astype(np.float32), prev_gray.astype(np.float32))
+            gray_corr_prev = float(_gc) if np.isfinite(_gc) else None
 
         dec_sample = rtp.decide(
             mono_now=mono_now,
@@ -444,6 +448,7 @@ def run_video_inference(
             last_raw_prob=float(last_carry_raw),
             operating_thr_proxy=float(thr_run),
             cam_hotspot_delta=None,
+            gray_corr_prev=gray_corr_prev,
         )
         if dec_sample.skipped_similar:
             perf["rt_skipped_similar"] += 1
