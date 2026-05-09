@@ -1,6 +1,7 @@
-"""Inference orchestration for the UI: CSV → risk table → events (same as legacy 07_ui)."""
+"""Inference orchestration for the UI: CSV → risk table → merged operational events."""
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -95,16 +96,50 @@ def run_analysis_pipeline(
         persistence_win=7,
         persistence_thr=thr_used,
     )
-    events_df = extract_events(scored)
+    merge_gap_sec = float(a.get("event_merge_gap_sec", 2.0))
+    events_df = extract_events(scored, merge_gap_sec=merge_gap_sec)
     scored_csv = out_dir / "video_predictions_scored.csv"
     events_csv = out_dir / "events.csv"
+    event_summary_csv = out_dir / "event_summary.csv"
+    mapping_export_json = out_dir / "mapping_export.json"
     scored.to_csv(scored_csv, index=False)
     events_df.to_csv(events_csv, index=False)
+    events_df.to_csv(event_summary_csv, index=False)
+
+    mapping_records: list[dict[str, Any]] = []
+    if events_df.empty:
+        mapping_records.append(
+            {
+                "fire_detected": False,
+                "risk_level": "ok",
+                "probability": 0.0,
+                "timestamp": None,
+            }
+        )
+    else:
+        for _, r in events_df.iterrows():
+            rl = str(r.get("risk_level", "ok"))
+            mapping_records.append(
+                {
+                    "fire_detected": rl in ("suspected", "confirmed"),
+                    "risk_level": rl,
+                    "probability": round(float(r.get("max_prob", 0.0)), 4),
+                    "timestamp": round(float(r.get("start_sec", 0.0)), 3),
+                    "event_id": str(r.get("event_id", "")),
+                    "event_duration": round(float(r.get("duration_sec", 0.0)), 3),
+                    "max_probability": round(float(r.get("max_prob", 0.0)), 4),
+                }
+            )
+    with mapping_export_json.open("w", encoding="utf-8") as fmap:
+        json.dump(mapping_records, fmap, indent=2, ensure_ascii=False)
+
     af_csv, af_jsonl, af_schema = alarm_feed_paths_for_csv(pred_csv)
     return {
         "pred_csv": str(pred_csv),
         "scored_csv": str(scored_csv),
         "events_csv": str(events_csv),
+        "event_summary_csv": str(event_summary_csv),
+        "mapping_export_json": str(mapping_export_json),
         "benchmark_json": str(bench_json),
         "alarm_feed_csv": str(af_csv),
         "alarm_feed_jsonl": str(af_jsonl),

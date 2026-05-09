@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.ui.components import render_metric_row
 from src.ui.constants import DEFAULT_INFER_UI_ARGS
+from src.ui.display_format import cap_probability_for_chart
 from src.ui.inference_runner import run_analysis_pipeline
 from src.ui.reporting import (
     FinalReport,
@@ -29,7 +30,7 @@ from src.ui.reporting import (
 from src.ui.result_panel import render_live_panel, turkish_caption_for_row
 from src.ui.styles import inject_global_styles
 from src.ui.video_helpers import nearest_row_by_frame
-from src.ui.video_panel import render_dual_preview, render_frame_cards
+from src.ui.video_panel import render_frame_cards, render_live_frame_preview
 
 try:
     from config import (
@@ -242,6 +243,23 @@ def _load_benchmark_dict(result: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
+def _default_preview_frame(events_df: pd.DataFrame | None, df_scored: pd.DataFrame | None) -> int:
+    if df_scored is None or df_scored.empty:
+        return 0
+    try:
+        if events_df is not None and not events_df.empty and "peak_frame" in events_df.columns:
+            imx = pd.to_numeric(events_df["max_prob"], errors="coerce").fillna(-1.0).idxmax()
+            return int(events_df.loc[imx, "peak_frame"])
+    except Exception:
+        pass
+    return int(df_scored.sort_values("frame_idx")["frame_idx"].iloc[-1])
+
+
+def _risk_level_tr(lv: object) -> str:
+    s = str(lv or "").strip().lower()
+    return {"confirmed": "Yüksek risk", "suspected": "İnceleme gerekli", "ok": "Güvenli"}.get(s, str(lv))
+
+
 def _run_with_progress(
     cfg: dict[str, Any],
     out_dir: Path,
@@ -256,10 +274,10 @@ def _run_with_progress(
             denom = max(int(est), int(done))
             r = min(1.0, float(done) / float(denom))
             over = f" (tahmin aşıldı — devam)" if done > est else ""
-            txt = f"Video analiz ediliyor: {done} / ~{est} örnek kare · geçen {em}{over}"
+            txt = f"Tarama: {done} / ~{est} kare işlendi · {em}{over}"
         else:
             r = min(1.0, float(done) / max(5000.0, float(done)))
-            txt = f"Video analiz ediliyor: {done} örnek kare · geçen {em} (süre/kare sayısı bilinmiyor)"
+            txt = f"Tarama ilerliyor: {done} işlenen zaman adımı · geçen {em}"
         progress.progress(min(0.99, r), text=txt)
 
     res = run_analysis_pipeline(
@@ -300,17 +318,19 @@ def _render_analysis_dashboard(
         or str(rgb_path).lower().startswith("https://")
     )
 
-    st.subheader("Video analiz ekranı")
-    left, right = st.columns([1.1, 1.0])
+    st.subheader("Operasyon paneli")
+    verdict_line = {"fire": "Yüksek risk modu aktif.", "review": "İnceleme gerekli görünüm.", "safe": "Güvenlik seviyesi normal."}[report.verdict_key]
+    st.caption(f"{report.verdict_tr} — {verdict_line}")
 
-    sel_key = "fire_sel_frame"
+    sel_key = "fire_preview_frame_idx"
     if sel_key not in st.session_state:
-        st.session_state[sel_key] = int(df_scored["frame_idx"].iloc[0])
+        st.session_state[sel_key] = int(_default_preview_frame(df_events, df_scored))
 
-    row_live = nearest_row_by_frame(df_scored, int(st.session_state[sel_key]))
+    raw_fi = int(st.session_state[sel_key])
+    row_live = nearest_row_by_frame(df_scored, raw_fi)
     if row_live is None:
-        row_live = df_scored.iloc[0]
-    prob = float(row_live[prob_col]) if prob_col in row_live.index else 0.0
+        row_live = df_scored.iloc[-1]
+    prob_raw = float(row_live[prob_col]) if prob_col in row_live.index else 0.0
     st_al = str(row_live.get("alarm_state", "")) if hasattr(row_live, "get") else ""
 
     tail = df_scored.sort_values("frame_idx").tail(5)
@@ -319,53 +339,115 @@ def _render_analysis_dashboard(
         tprob = pd.to_numeric(tail[prob_col], errors="coerce")
         slope = float(tprob.diff().mean()) if len(tprob) else None
 
-    cap = turkish_caption_for_row(prob, alarm_e, inceleme_e, slope, st_al or None)
+    cap = turkish_caption_for_row(prob_raw, alarm_e, inceleme_e, slope, st_al or None)
 
-    with left:
-        render_dual_preview(
-            rgb_path if exists_or_stream else None,
-            int(st.session_state[sel_key]),
-            df_scored,
-            prob_col,
-        )
-        st.markdown("---")
-        render_frame_cards(
-            df_scored,
-            rgb_path,
-            prob_col,
-            session_key_selected=sel_key,
-        )
+    col_vid, col_stat = st.columns([1.2, 1.0])
+    with col_vid:
+        render_live_frame_preview(rgb_path if exists_or_stream else None, raw_fi, df_scored)
+    with col_stat:
+        render_live_panel(prob_raw, alarm_e, inceleme_e, st_al or None, cap)
 
-    with right:
-        render_live_panel(
-            prob * 100.0,
-            prob,
-            alarm_e,
-            inceleme_e,
-            st_al or None,
-            cap,
+    st.markdown("### Risk — zaman içinde")
+    chart_df = df_scored.sort_values("frame_idx").copy()
+    ts_col = pd.to_numeric(chart_df["timestamp_sec"], errors="coerce").fillna(0.0)
+    chart_df["Zaman_sn"] = ts_col
+    raw_probs = pd.to_numeric(chart_df[prob_col], errors="coerce").fillna(0.0)
+    chart_df["Gösterilen risk"] = raw_probs.map(cap_probability_for_chart)
+    chart_df["Alarm eşiği"] = min(float(alarm_e), cap_probability_for_chart(float(alarm_e)))
+    chart_df["İnceleme eşiği"] = min(float(inceleme_e), cap_probability_for_chart(float(inceleme_e)))
+    try:
+        st.line_chart(
+            chart_df.set_index("Zaman_sn")[["Gösterilen risk", "Alarm eşiği", "İnceleme eşiği"]],
+            height=300,
         )
-        st.markdown("---")
-        st.markdown("##### Olasılığın zaman içindeki seyri")
-        chart_df = df_scored.sort_values("frame_idx").copy()
-        ts_col = pd.to_numeric(chart_df["timestamp_sec"], errors="coerce").fillna(0.0)
-        chart_df["Zaman_sn"] = ts_col
-        chart_df["Yangın olasılığı"] = pd.to_numeric(chart_df[prob_col], errors="coerce").fillna(0.0)
-        chart_df["Alarm eşiği"] = float(alarm_e)
-        chart_df["İnceleme eşiği"] = float(inceleme_e)
-        try:
-            st.line_chart(
-                chart_df.set_index("Zaman_sn")[
-                    ["Yangın olasılığı", "Alarm eşiği", "İnceleme eşiği"]
-                ],
-                height=280,
+    except Exception:
+        st.line_chart(chart_df[["Gösterilen risk"]], height=300)
+
+    st.markdown("### Olay özeti")
+    if df_events is None or df_events.empty:
+        st.info("Operasyon sırasında teyit gerektiren ardışık olay kümesi tespit edilmedi.")
+    else:
+        ev_disp = pd.DataFrame(
+            {
+                "Olay no": pd.RangeIndex(start=1, stop=len(df_events) + 1),
+                "Başlangıç (sn)": pd.to_numeric(df_events["start_sec"], errors="coerce").map(lambda x: f"{float(x):.1f}" if pd.notna(x) else "—"),
+                "Bitiş (sn)": pd.to_numeric(df_events["end_sec"], errors="coerce").map(lambda x: f"{float(x):.1f}" if pd.notna(x) else "—"),
+                "Süre (sn)": pd.to_numeric(df_events["duration_sec"], errors="coerce").map(lambda x: f"{float(x):.1f}" if pd.notna(x) else "—"),
+                "Maks risk": pd.to_numeric(df_events["max_prob"], errors="coerce").map(
+                    lambda p: ">97%"
+                    if (pd.notna(p) and float(p) > 0.97)
+                    else (f"{100.0 * float(p):.0f}%")
+                    if pd.notna(p)
+                    else "—"
+                ),
+                "Ort risk": pd.to_numeric(df_events["avg_prob"], errors="coerce").map(
+                    lambda p: (
+                        ">97%"
+                        if (pd.notna(p) and float(p) > 0.97)
+                        else (f"{100.0 * float(p):.0f}%")
+                        if pd.notna(p)
+                        else "—"
+                    )
+                ),
+                "Durum": df_events["risk_level"].map(_risk_level_tr),
+                "Tepe kare": df_events["peak_frame"].astype(str),
+            }
+        )
+        st.dataframe(ev_disp, use_container_width=True)
+
+    st.markdown("### Dışa aktarım")
+    d1, d2, d3, d4, d5 = st.columns(5)
+    with d1:
+        st.download_button(
+            "Skorlu ölçümler (CSV)",
+            data=dataframe_to_csv_bytes(df_scored),
+            file_name="video_predictions_scored.csv",
+            mime="text/csv",
+        )
+    with d2:
+        md = build_markdown_report(
+            report,
+            model_path=str(cfg["ckpt"]),
+            video_name=Path(rgb_path).name,
+            prob_col=prob_col,
+        )
+        st.download_button(
+            "Operasyon özet raporu (MD)",
+            data=md.encode("utf-8"),
+            file_name="yangin_operasyon_ozeti.md",
+            mime="text/markdown",
+        )
+    with d3:
+        zip_b = zip_suspicious_frames(rgb_path, df_scored, prob_col=prob_col, review_thr=inceleme_e)
+        if zip_b:
+            st.download_button(
+                "Şüpheli kareler (ZIP)",
+                data=zip_b,
+                file_name="supheli_kareler.zip",
+                mime="application/zip",
             )
-        except Exception:
-            st.line_chart(chart_df[["Yangın olasılığı"]], height=280)
-        st.caption(
-            "_Eşik çizgileri: alarm (yüksek uyarı) ve inceleme (orta) düzeyidir._"
+        else:
+            st.caption("ZIP yok")
+    with d4:
+        st.download_button(
+            "Olay özeti (CSV)",
+            data=dataframe_to_csv_bytes(df_events if df_events is not None else pd.DataFrame()),
+            file_name="event_summary.csv",
+            mime="text/csv",
         )
+    with d5:
+        mp = Path(str(result.get("mapping_export_json", "")))
+        if mp.is_file():
+            st.download_button(
+                "Haritalama (JSON)",
+                data=mp.read_bytes(),
+                file_name="mapping_export.json",
+                mime="application/json",
+            )
+        else:
+            st.caption("JSON yok")
 
+    with st.expander("Teknik detaylar", expanded=False):
         bench = _load_benchmark_dict(result)
         n_infer = int(bench.get("infer_calls") or 0)
         n_sim = int(bench.get("rt_skipped_similar") or 0)
@@ -379,122 +461,77 @@ def _render_analysis_dashboard(
             n_decoded = len(df_scored)
         elif n_decoded <= 0:
             n_decoded = len(df_scored)
-        alarm_sec = _alarm_active_duration_sec(df_scored)
+        fps_proc = bench.get("pipeline_fps_processed")
 
-        with st.expander("Akış ve seçici çıkarım (RT / drone)", expanded=False):
-            render_metric_row(
-                [
-                    ("Toplam işlenen kare", str(max(n_decoded, len(df_scored)))),
-                    ("Model çıkarımı", str(n_infer)),
-                    ("Benzer kare nedeniyle atlanan", str(n_sim)),
-                    ("Hız hedefi yüzünden ertelenen", str(n_budget)),
-                    ("Yaklaşık aktif alarm süresi", f"{alarm_sec:.1f} s"),
-                ]
-            )
-            if bench:
-                st.caption(
-                    f"Hedef çıkarım ≈ `{bench.get('target_infer_hz')}` Hz · "
-                    f"En uzun çıkarımsız pencere ≤ `{bench.get('max_infer_gap_sec')}` sn"
-                )
-
-    st.markdown("---")
-    st.subheader("Özet rapor")
-    v_kind = report.verdict_key
-    badge = (
-        "🔴 Yangın riski yüksek"
-        if v_kind == "fire"
-        else "🟡 İnceleme gerekli"
-        if v_kind == "review"
-        else "🟢 Yangın yok"
-    )
-    st.markdown(f"**Genel sonuç:** {report.verdict_tr} &nbsp; {badge}")
-    render_metric_row(
-        [
-            ("En yüksek olasılık", f"{report.max_prob:.1%}"),
-            ("Ortalama olasılık", f"{report.mean_prob:.1%}"),
-            ("Analiz edilen örnek", str(report.frames_analyzed)),
-            ("Alarm eşiği", f"{report.alarm_esigi:.3f}"),
+        perf_rows = [
+            ("İşlenen kare", str(max(n_decoded, len(df_scored)))),
+            ("Çıkarım (infer)", str(n_infer)),
+            ("Benzer kare atlanan", str(n_sim)),
+            ("Hedef hızından ıskalanan", str(n_budget)),
         ]
-    )
-    st.markdown(f"**İnceleme eşiği:** {report.inceleme_esigi:.3f}")
-    if report.alarm_zaman_araliklari:
-        st.markdown("**Alarm için öne çıkan zaman aralıkları:**")
-        for a, b in report.alarm_zaman_araliklari:
-            st.write(f"- {a:.2f} s – {b:.2f} s")
-    else:
-        st.info("Sürekli yüksek uyarı segmenti raporlanmadı (eşik üstü kısa süreler olabilir).")
+        sf = bench.get("skipped_frames")
+        if sf is not None:
+            perf_rows.insert(1, ("Kayıptan atlanan kare", str(int(sf))))
+        if fps_proc is not None:
+            perf_rows.append(("Pipeline FPS (~)", f"{float(fps_proc):.2f}"))
+        render_metric_row(perf_rows)
+        alarm_sec = _alarm_active_duration_sec(df_scored)
+        st.caption(f"Tahmini alarm aktif süresi (iş mantığı zamanı): {alarm_sec:.1f} sn")
 
-    st.markdown(f"**Model güvenilirlik notu:** {report.guvenilirlik_notu}")
-
-    st.markdown("---")
-    st.subheader("Çıktıları indir")
-    csv_b = dataframe_to_csv_bytes(df_scored)
-    st.download_button(
-        "Örnek kare tablosunu indir (CSV)",
-        data=csv_b,
-        file_name="yangin_analiz_olcumleri.csv",
-        mime="text/csv",
-    )
-    md = build_markdown_report(
-        report,
-        model_path=str(cfg["ckpt"]),
-        video_name=Path(rgb_path).name,
-        prob_col=prob_col,
-    )
-    st.download_button(
-        "Özet raporu indir (Markdown)",
-        data=md.encode("utf-8"),
-        file_name="yangin_analiz_ozeti.md",
-        mime="text/markdown",
-    )
-    zip_b = zip_suspicious_frames(rgb_path, df_scored, prob_col=prob_col, review_thr=inceleme_e)
-    if zip_b:
-        st.download_button(
-            "Şüpheli kareleri indir (ZIP, JPG)",
-            data=zip_b,
-            file_name="supheli_kareler.zip",
-            mime="application/zip",
+        st.markdown("###### Kare örneklemeönizleme ve ham tablo")
+        render_frame_cards(
+            df_scored,
+            rgb_path if exists_or_stream else "",
+            prob_col,
+            session_key_selected=sel_key,
         )
-    else:
-        st.caption("İnceleme eşiği üstü kare bulunamadı veya video okunamadı — ZIP oluşturulmadı.")
 
-    st.caption(
-        "_PDF: Markdown dosyasını bir metin düzenleyicide açıp «Yazdır → PDF olarak kaydet» kullanabilirsiniz._"
-    )
-
-
-def _render_debug(cfg: dict[str, Any], result: dict[str, Any]) -> None:
-    df_scored: pd.DataFrame = result["df_scored"]
-    prob_col = _pick_prob_col(df_scored)
-    with st.expander("Gelişmiş — teknik ayrıntılar", expanded=False):
-        st.markdown("##### Ham olasılık ve zaman bilgisi")
+        st.markdown("###### Ham çıktılar (ilk kayıtlar)")
         c1, c2 = st.columns(2)
         with c1:
             st.dataframe(
                 df_scored[
                     [c for c in ["frame_idx", "timestamp_sec", prob_col, "prob_fire_raw"] if c in df_scored.columns]
-                ].head(40),
+                ].head(50),
                 use_container_width=True,
             )
         with c2:
-            ptail = [c for c in ["decision_prob", "prob_fire", "prob_fire_ema", "prob_fire_ma"] if c in df_scored.columns]
+            ptail = [c for c in ["decision_prob", "prob_fire", "alarm_state", "pred_fire"] if c in df_scored.columns]
             if ptail:
-                st.dataframe(df_scored[ptail].tail(40), use_container_width=True)
-        st.markdown("##### Model ve eşikler")
+                st.dataframe(df_scored[ptail].head(50), use_container_width=True)
+
+        infer_profile = cfg.get("infer_args") if isinstance(cfg.get("infer_args"), dict) else {}
+        paths_block = {
+            k: result.get(k)
+            for k in (
+                "pred_csv",
+                "scored_csv",
+                "events_csv",
+                "event_summary_csv",
+                "mapping_export_json",
+                "benchmark_json",
+                "alarm_feed_csv",
+            )
+            if k in result
+        }
+
+        st.markdown("###### Yapılandırma ve dosya yolları")
         st.json(
             {
-                "model_path": cfg.get("ckpt"),
-                "thermal_path": cfg.get("th_path"),
-                "threshold_used": result.get("threshold_used"),
-                "hyst_high_used": result.get("hyst_high_used"),
-                "hyst_low_used": result.get("hyst_low_used"),
-                "out_files": {k: result[k] for k in ("pred_csv", "scored_csv", "events_csv", "benchmark_json") if k in result},
-                "infer_profile": "default",
+                "kalibrasyon": str(cfg.get("ckpt")),
+                "termal": cfg.get("th_path"),
+                "isletme_esigi": result.get("threshold_used"),
+                "alarm_histerezisi_ust": result.get("hyst_high_used"),
+                "alarm_histerezisi_alt": result.get("hyst_low_used"),
+                "cikti_dosyalari": paths_block,
+                "cikarim_profili": infer_profile or {},
             }
         )
-        if Path(str(result.get("benchmark_json", ""))).is_file():
-            st.markdown("##### Performans (benchmark JSON)")
-            st.code(Path(result["benchmark_json"]).read_text(encoding="utf-8")[:4000], language="json")
+        bp = Path(str(result.get("benchmark_json", "")))
+        if bp.is_file():
+            st.markdown("###### Performans (benchmark)")
+            txt = bp.read_text(encoding="utf-8")
+            st.code(txt[:8000], language="json")
 
 
 def _render_review_tab() -> None:
@@ -587,11 +624,10 @@ def main() -> None:
                 if st.button("← Yeni analiz", type="secondary"):
                     st.session_state["fire_analysis_cfg"] = None
                     st.session_state["fire_analysis_result"] = None
-                    if "fire_sel_frame" in st.session_state:
-                        del st.session_state["fire_sel_frame"]
+                if "fire_preview_frame_idx" in st.session_state:
+                    del st.session_state["fire_preview_frame_idx"]
                     st.rerun()
                 _render_analysis_dashboard(cfg, res)
-                _render_debug(cfg, res)
 
         st.caption(
             "Kurumsal kullanımda daha zengin arayüz için ileride **FastAPI + React** ile "

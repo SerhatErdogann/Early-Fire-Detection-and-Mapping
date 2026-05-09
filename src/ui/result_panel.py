@@ -4,6 +4,8 @@ from __future__ import annotations
 import streamlit as st
 
 from src.ui.components import render_status_header
+from src.ui.display_format import probability_meter_percent
+
 
 def classify_ui_status(
     prob: float,
@@ -50,13 +52,17 @@ def turkish_caption_for_row(
 
 
 def render_live_panel(
-    prob_pct: float,
-    prob: float,
+    prob_raw: float,
     alarm_esigi: float,
     inceleme_esigi: float,
     alarm_state: str | None,
     caption: str,
 ) -> None:
-    title, badge, kind = classify_ui_status(prob, alarm_esigi, inceleme_esigi, alarm_state)
-    render_status_header(title, prob_pct, badge, kind)
+    title, badge, kind = classify_ui_status(prob_raw, alarm_esigi, inceleme_esigi, alarm_state)
+    render_status_header(
+        title,
+        probability_meter_percent(prob_raw),
+        badge,
+        kind,
+    )
     st.info(caption)

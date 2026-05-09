@@ -20,6 +20,7 @@ DEFAULT_INFER_UI_ARGS: dict[str, Any] = {
     "temporal_guard": True,
     "target_infer_hz": 1.0,
     "max_infer_gap_sec": 1.0,
+    "event_merge_gap_sec": 2.0,
     "min_component_area": float(INFERENCE_DEFAULT.get("min_component_area", 0.01) or 0.01),
     "texture_prob_max": float(INFERENCE_DEFAULT.get("texture_prob_max", 0.2) or 0.2),
     "small_fire_boost": float(INFERENCE_DEFAULT.get("small_fire_boost", 1.3) or 1.3),

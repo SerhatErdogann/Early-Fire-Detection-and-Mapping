@@ -32,9 +32,21 @@ DASHBOARD_CSS = """
     font-size: 0.88rem;
     border: 1px solid rgba(255,255,255,0.15);
   }
-  .fire-badge-ok { background: rgba(46,204,113,0.2); color: #a8f0c4; }
-  .fire-badge-warn { background: rgba(241,196,15,0.22); color: #ffeaa7; }
-  .fire-badge-danger { background: rgba(231,76,60,0.25); color: #ffb4a8; }
+  .fire-badge-ok {
+    background: rgba(74, 124, 89, 0.38);
+    color: #d7eedf;
+    border-color: rgba(120, 180, 140, 0.35);
+  }
+  .fire-badge-warn {
+    background: rgba(168, 112, 48, 0.38);
+    color: #f3e6d4;
+    border-color: rgba(210, 150, 70, 0.4);
+  }
+  .fire-badge-danger {
+    background: rgba(132, 58, 62, 0.45);
+    color: #f0dcdc;
+    border-color: rgba(200, 100, 100, 0.45);
+  }
   .fire-frame-thumb {
     border-radius: 8px;
     overflow: hidden;
