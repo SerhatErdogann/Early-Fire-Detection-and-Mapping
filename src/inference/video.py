@@ -708,7 +708,13 @@ def run_video_inference(
             try:
                 est: int | None
                 if total > 0:
-                    est = max(1, int((total + max(1, int(step)) - 1) // max(1, int(step))))
+                    if adaptive_step:
+                        # Üst sınır: adaptif modda en küçük adım (min_step) ile en çok kaç çıktı satırı
+                        min_sf = max(1, int(adaptive_min_step))
+                        est = max(1, int((total + min_sf - 1) // min_sf))
+                    else:
+                        sf = max(1, int(step_frames))
+                        est = max(1, int((total + sf - 1) // sf))
                 else:
                     est = None
                 progress_callback(int(len(rows)), est)

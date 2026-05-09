@@ -205,14 +205,19 @@ def _run_with_progress(
     out_dir: Path,
 ) -> dict[str, Any]:
     progress = st.progress(0.0, text="Hazırlanıyor…")
+    t_started = time.perf_counter()
 
     def cb(done: int, est: int | None) -> None:
+        elapsed_s = int(time.perf_counter() - t_started)
+        em = f"{elapsed_s // 60} dk {elapsed_s % 60} sn"
         if est and est > 0:
-            r = min(1.0, float(done) / float(est))
-            txt = f"Video analiz ediliyor: {done} / ~{est} örnek kare"
+            denom = max(int(est), int(done))
+            r = min(1.0, float(done) / float(denom))
+            over = f" (tahmin aşıldı — devam)" if done > est else ""
+            txt = f"Video analiz ediliyor: {done} / ~{est} örnek kare · geçen {em}{over}"
         else:
-            r = min(1.0, float(done) / 5000.0)
-            txt = f"Video analiz ediliyor: {done} örnek kare (süre bilinmiyor veya canlı akış)"
+            r = min(1.0, float(done) / max(5000.0, float(done)))
+            txt = f"Video analiz ediliyor: {done} örnek kare · geçen {em} (süre/kare sayısı bilinmiyor)"
         progress.progress(min(0.99, r), text=txt)
 
     res = run_analysis_pipeline(

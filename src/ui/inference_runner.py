@@ -56,6 +56,8 @@ def run_analysis_pipeline(
         use_fp16=bool(a.get("fp16", False)),
         temporal_guard=bool(a.get("temporal_guard", True)),
         adaptive_step=bool(a.get("adaptive_step", True)),
+        adaptive_min_step=int(a.get("adaptive_min_step", 1)),
+        adaptive_max_step=int(a.get("adaptive_max_step", 12)),
         min_component_area=float(a.get("min_component_area", 0.01)),
         texture_prob_max=float(a.get("texture_prob_max", INFERENCE_DEFAULT.get("texture_prob_max", 0.2))),
         small_fire_boost=float(a.get("small_fire_boost", INFERENCE_DEFAULT.get("small_fire_boost", 1.3))),

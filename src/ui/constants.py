@@ -32,6 +32,7 @@ PRESETS: list[InferPreset] = [
             "tta": False,
             "fp16": True,
             "adaptive_step": True,
+            "adaptive_min_step": 2,
             "temporal_guard": True,
             "min_component_area": 0.0,
             "texture_prob_max": 0.0,
@@ -47,7 +48,7 @@ PRESETS: list[InferPreset] = [
     InferPreset(
         key="balanced",
         title="Dengeli analiz",
-        description="Günlük kullanım için önerilen denge: hız ve güvenilirlik.",
+        description="Günlük kullanım için önerilen denge. Yüksek riskte adaptif adım en az 2 kare tutulur (CPU’da ~2× hız); detay için “Detaylı analiz”.",
         args={
             "size": 224,
             "step": 6,
@@ -56,6 +57,7 @@ PRESETS: list[InferPreset] = [
             "tta": True,
             "fp16": True,
             "adaptive_step": True,
+            "adaptive_min_step": 2,
             "temporal_guard": True,
             "min_component_area": float(INFERENCE_DEFAULT.get("min_component_area", 0.01) or 0.01),
             "prob_temporal_blend": 0.2,
@@ -68,7 +70,7 @@ PRESETS: list[InferPreset] = [
     InferPreset(
         key="safe",
         title="Detaylı analiz",
-        description="Daha büyük giriş ve daha sık örnekleme; yavaş ama daha ayrıntılı.",
+        description="Daha büyük giriş ve daha sık örnekleme; yüksek riskte her kare işlenebilir — CPU’da çok uzun sürebilir.",
         args={
             "size": 384,
             "step": 4,
@@ -77,6 +79,7 @@ PRESETS: list[InferPreset] = [
             "tta": True,
             "fp16": False,
             "adaptive_step": True,
+            "adaptive_min_step": 1,
             "temporal_guard": True,
             "min_component_area": float(INFERENCE_DEFAULT.get("min_component_area", 0.01) or 0.01),
             "prob_temporal_blend": 0.25,
