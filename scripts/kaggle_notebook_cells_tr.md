@@ -119,7 +119,7 @@ Runner zaten `--no-select-best` verilmedikçe sonunda bunu yapar.
 ```bash
 python scripts/select_best_and_report.py \
   --results_csv /kaggle/working/outputs/improve_results.csv \
-  --out_ckpt /kaggle/working/models/best_model.pt \
+  --copy_balanced_ckpt /kaggle/working/models/best_model.pt \
   --out_md /kaggle/working/outputs/best_model_report.md
 ```
 

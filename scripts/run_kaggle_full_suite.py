@@ -544,7 +544,7 @@ def main() -> int:
         str(code_root / "scripts" / "select_best_and_report.py"),
         "--results_csv",
         str(improve_csv),
-        "--out_ckpt",
+        "--copy_balanced_ckpt",
         str(mods / "best_model.pt"),
         "--out_md",
         str(outs / "best_model_report.md"),
