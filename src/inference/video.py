@@ -22,6 +22,11 @@ from .postprocess import stats_from_soft_map
 from .preprocess import prep_rgb, prep_thermal
 from .alarm import AlarmConfig, AlarmStateMachine
 from .capture_utils import open_video_capture
+from .downstream_alarm_feed import (
+    alarm_feed_row_dict,
+    export_alarm_feed_bundle,
+    public_alarm_state,
+)
 from .frame_sampling import AdaptiveFrameSampler
 
 try:
@@ -132,9 +137,16 @@ def run_video_inference(
     stream_buffer_reduce: bool = True,
     infer_batch_size: int = 1,
     progress_callback: Callable[[int, int | None], None] | None = None,
+    export_alarm_feed: bool = True,
 ):
     """
     Run fire classification on video (RGB only or RGB+thermal).
+
+    Writes ``out_csv`` (full diagnostic CSV). When ``export_alarm_feed=True``,
+    alongside it writes ``*_alarm_feed.csv``, ``*_alarm_feed.jsonl``, and
+    ``*_alarm_feed.schema.json`` for GIS / downstream alarm consumers (already
+    temporally smoothed + hysteresis / persistence state per row).
+
     Uses optional moving-average + EMA blend for probability smoothing, plus a
     consecutive-frame rule independent of hysteresis alarms.
     """
@@ -307,6 +319,8 @@ def run_video_inference(
     hyst_fire = False
     persist_run = 0
     burst_run = 0
+    alarm_feed_rows: list[dict] = []
+    alarm_episode_start_ts: float | None = None
     n_processed = 0
     modal_agreement = float("nan")
 
@@ -363,6 +377,7 @@ def run_video_inference(
             burst_run = 0
             hyst_fire = False
             track_id = 0
+            alarm_episode_start_ts = None
 
         perf["decode_s"] += time.perf_counter() - t_decode0
 
@@ -667,6 +682,28 @@ def run_video_inference(
             "alarm_confidence": float(alarm_conf),
             "alarm_reason": alarm_reason,
         })
+        if export_alarm_feed:
+            ts_row = float(idx) / float(fps)
+            pub = public_alarm_state(state, temporal_guard=temporal_guard)
+            if pub in ("suspected", "confirmed"):
+                if alarm_episode_start_ts is None:
+                    alarm_episode_start_ts = ts_row
+                esp = alarm_episode_start_ts
+            else:
+                esp = None
+                alarm_episode_start_ts = None
+            alarm_feed_rows.append(
+                alarm_feed_row_dict(
+                    frame_idx=idx,
+                    timestamp_sec=ts_row,
+                    fire_probability=prob_model,
+                    smoothed_probability=decision_prob,
+                    internal_alarm_state=state,
+                    temporal_guard=temporal_guard,
+                    pred_fire_burst=int(pred_fire_burst),
+                    episode_start_ts=esp,
+                )
+            )
         if progress_callback is not None:
             try:
                 est: int | None
@@ -792,6 +829,8 @@ def run_video_inference(
             ]
         )
     df_out.to_csv(out_csv, index=False)
+    if export_alarm_feed:
+        export_alarm_feed_bundle(out_csv, alarm_feed_rows)
     if benchmark:
         total_s = max(1e-9, perf["decode_s"] + perf["preprocess_s"] + perf["infer_s"] + perf["postprocess_s"])
         bench = {

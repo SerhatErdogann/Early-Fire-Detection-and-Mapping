@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 
 from src.eval.event_extractor import extract_events
+from src.inference.downstream_alarm_feed import alarm_feed_paths_for_csv
 from src.inference.model_loader import route_checkpoint_for_video
 from src.inference.video import run_video_inference
 from src.risk.scoring import build_risk_table
@@ -17,6 +18,7 @@ try:
 except Exception:  # pragma: no cover
     INFERENCE_DEFAULT = {}
     RISK_SCORE_WEIGHTS = {}
+
 
 def run_analysis_pipeline(
     rgb_path: str,
@@ -96,11 +98,15 @@ def run_analysis_pipeline(
     events_csv = out_dir / "events.csv"
     scored.to_csv(scored_csv, index=False)
     events_df.to_csv(events_csv, index=False)
+    af_csv, af_jsonl, af_schema = alarm_feed_paths_for_csv(pred_csv)
     return {
         "pred_csv": str(pred_csv),
         "scored_csv": str(scored_csv),
         "events_csv": str(events_csv),
         "benchmark_json": str(bench_json),
+        "alarm_feed_csv": str(af_csv),
+        "alarm_feed_jsonl": str(af_jsonl),
+        "alarm_feed_schema": str(af_schema),
         "df_scored": scored,
         "df_events": events_df,
         "threshold_used": thr_used,

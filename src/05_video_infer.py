@@ -147,6 +147,11 @@ def main():
         default=1,
         help="Placeholder (only 1 supported; temporal/CAM-safe path).",
     )
+    ap.add_argument(
+        "--no-alarm-feed-export",
+        action="store_true",
+        help="Mapping/GIS downstream: alarm_feed CSV+JSONL yazılmasın.",
+    )
     args = ap.parse_args()
 
     if not args.rgb_video and not args.th_video:
@@ -210,8 +215,16 @@ def main():
         max_step_cap=int(args.max_step_cap),
         stream_buffer_reduce=bool(args.stream_buffer_reduce),
         infer_batch_size=int(args.infer_batch_size),
+        export_alarm_feed=not bool(args.no_alarm_feed_export),
     )
     print("Output written:", out_csv)
+    if not args.no_alarm_feed_export:
+        from src.inference.downstream_alarm_feed import alarm_feed_paths_for_csv
+
+        c, jl, scm = alarm_feed_paths_for_csv(Path(out_csv))
+        print("Alarm feed (mapping):", c)
+        print("Alarm feed JSONL:", jl)
+        print("Alarm feed schema:", scm)
 
 
 if __name__ == "__main__":
