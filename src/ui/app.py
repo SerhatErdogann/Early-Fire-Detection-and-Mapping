@@ -596,7 +596,7 @@ def _render_review_tab() -> None:
 def _render_metrics_tab() -> None:
     st.caption(
         "`final_candidates.zip` içindeki dosyaları bir klasöre çıkarın ve o klasörün yolunu girin; "
-        "veyen **CSV / JSON** doğrudan yükleyin."
+        "veya **CSV / JSON** doğrudan yükleyin."
     )
     outputs_dir_str = st.text_input(
         "Çıktı klasörü (örn. `outputs` veya çıkarılmış `final_candidates`)",
@@ -623,12 +623,12 @@ def _render_metrics_tab() -> None:
                     if isinstance(d, dict) and any(v is not None for v in d.values()):
                         rows.append(
                             {
-                                "Bölüm": split,
-                                "Doğruluk": d.get("acc"),
-                                "AUC": d.get("auc"),
-                                "Kesinlik": d.get("precision"),
-                                "Yangını kaçırmama": d.get("recall"),
-                                "F1": d.get("f1"),
+                                "split": split,
+                                "accuracy": d.get("acc"),
+                                "auc": d.get("auc"),
+                                "precision": d.get("precision"),
+                                "recall": d.get("recall"),
+                                "f1": d.get("f1"),
                             }
                         )
                 if rows:
@@ -674,19 +674,19 @@ def _render_metrics_tab() -> None:
             if isinstance(d, dict) and len(d):
                 rows.append(
                     {
-                        "Bölüm": split,
-                        "Doğruluk": d.get("acc"),
-                        "AUC": d.get("auc"),
-                        "Kesinlik": d.get("precision"),
-                        "Yangını kaçırmama": d.get("recall"),
-                        "F1": d.get("f1"),
+                        "split": split,
+                        "accuracy": d.get("acc"),
+                        "auc": d.get("auc"),
+                        "precision": d.get("precision"),
+                        "recall": d.get("recall"),
+                        "f1": d.get("f1"),
                     }
                 )
         if rows:
             st.dataframe(pd.DataFrame(rows), use_container_width=True)
-        extras = [{"Alan": k, "Değer": payload[k]} for k in ("epoch", "mode", "model_family", "threshold") if k in payload]
+        extras = [{"field": k, "value": payload[k]} for k in ("epoch", "mode", "model_family", "threshold") if k in payload]
         if extras:
-            with st.expander("Ek alanlar"):
+            with st.expander("Extra fields"):
                 st.dataframe(pd.DataFrame(extras), use_container_width=True)
         if not rows:
             st.caption("`val`/`test` blokları yok; ham JSON (kısaltılmış).")
@@ -706,7 +706,8 @@ def _render_metrics_tab() -> None:
             st.dataframe(df, use_container_width=True)
 
     st.caption(
-        "**Yangını kaçırmama** = duyarlılık (recall). Video çıkarım CSV’leri bu listeden bilinçli olarak çıkarılmıştır."
+        "Summary columns: **accuracy**, **precision**, **recall** (sensitivity), **f1**. "
+        "Video inference CSV filenames are intentionally excluded from the file list."
     )
 
 
