@@ -27,7 +27,7 @@ from .downstream_alarm_feed import (
     export_alarm_feed_bundle,
     public_alarm_state,
 )
-from .frame_sampling import AdaptiveFrameSampler
+from .rt_stream_policy import DroneRTStreamPolicy, _gray_hist_vec
 
 try:
     from config import INFERENCE_DEFAULT, OUTPUTS_DIR
@@ -138,6 +138,9 @@ def run_video_inference(
     infer_batch_size: int = 1,
     progress_callback: Callable[[int, int | None], None] | None = None,
     export_alarm_feed: bool = True,
+    *,
+    target_infer_hz: float = 1.0,
+    max_infer_gap_sec: float = 1.0,
 ):
     """
     Run fire classification on video (RGB only or RGB+thermal).
@@ -147,8 +150,15 @@ def run_video_inference(
     ``*_alarm_feed.schema.json`` for GIS / downstream alarm consumers (already
     temporally smoothed + hysteresis / persistence state per row).
 
-    Uses optional moving-average + EMA blend for probability smoothing, plus a
-    consecutive-frame rule independent of hysteresis alarms.
+    Temporal smoothing + hysteresis ile tek karelik spike filtresi korunur.
+    Yerel sıra okuma yapılır; tüm akış videoya yüklemez.
+
+    Adaptif ``step_frames`` atlama kodu yerine seçici çıkarım
+    (:class:`~src.inference.rt_stream_policy.DroneRTStreamPolicy`) kullanılır:
+    yaklaşık ``target_infer_hz`` model çağrısı, kalp atımı (``max_infer_gap_sec``),
+    sahne/tehlike zorunluluğu ve konservatif benzer-kare atlama.
+
+    Deprecated (yok sayılır): ``adaptive_step``, ``step_frames``, ``auto_step_long_video``.
     """
     out_csv = Path(out_csv or OUTPUTS_DIR / "video_predictions.csv")
     out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -276,20 +286,16 @@ def run_video_inference(
     prev_largest_area = 0.0
     track_id = 0
     win = max(1, int(smooth_window))
-    step = max(1, int(step_frames))
-    duration_est_s = float(total) / float(fps) if total > 0 else 0.0
-    step_pre_auto = step
-    if (
-        auto_step_long_video
-        and duration_est_s >= float(long_video_seconds)
-        and step_pre_auto < int(max_step_cap)
-    ):
-        scaled = max(step_pre_auto, int(round(step_pre_auto * float(long_video_step_scale))))
-        step = min(int(max_step_cap), scaled)
+    if adaptive_step or auto_step_long_video:
         print(
-            f"[video] long video (~{duration_est_s:.0f}s): step_frames {step_pre_auto} -> {step} "
-            f"(<= max_step_cap={max_step_cap})"
+            "[video] bilgi: adaptive_step ve auto_step_long_video yok sayılıyor; "
+            "DroneRTStreamPolicy (target_infer_hz, max_infer_gap_sec) seçici çıkarım kullanılıyor."
         )
+    rtp = DroneRTStreamPolicy(
+        target_infer_hz=float(target_infer_hz),
+        max_infer_gap_sec=float(max_infer_gap_sec),
+    )
+
     alarm_machine = AlarmStateMachine(
         AlarmConfig(
             high_threshold=float(hyst_high_eff),
@@ -299,13 +305,6 @@ def run_video_inference(
             cooldown_frames=max(2, int(persist_target)),
         )
     )
-    sampler = AdaptiveFrameSampler(
-        base_step=step,
-        min_step=max(1, int(adaptive_min_step)),
-        max_step=max(int(adaptive_max_step), step),
-        low_motion_threshold=float(adaptive_low_motion),
-        high_risk_threshold=float(adaptive_high_risk),
-    )
     perf = {
         "decode_s": 0.0,
         "preprocess_s": 0.0,
@@ -313,6 +312,10 @@ def run_video_inference(
         "postprocess_s": 0.0,
         "processed_frames": 0,
         "skipped_frames": 0,
+        "decode_frames": 0,
+        "infer_calls": 0,
+        "rt_skipped_similar": 0,
+        "rt_skipped_budget": 0,
     }
     idx = 0
     prev_gray = None
@@ -321,6 +324,13 @@ def run_video_inference(
     burst_run = 0
     alarm_feed_rows: list[dict] = []
     alarm_episode_start_ts: float | None = None
+    last_carry_raw = 0.0
+    last_carry_prob_smooth = 0.48
+    last_carry_decision_prob = 0.48
+    last_carry_ma_val = 0.48
+    last_carry_ema_val = 0.48
+    last_carry_largest = 0.0
+    logits = None  # reused if CAM; skipped paths leave None
     n_processed = 0
     modal_agreement = float("nan")
 
@@ -381,18 +391,9 @@ def run_video_inference(
 
         perf["decode_s"] += time.perf_counter() - t_decode0
 
-        t_pre0 = time.perf_counter()
-        rgb_arr = None
-        rgb_base = None
-        th_arr = None
-        if fr is not None:
-            rgb_arr, rgb_base = prep_rgb(fr, size=size)
-        if th_fr is not None:
-            th_arr, _ = prep_thermal(th_fr, size=size)
-
-        # Pick mode_used for this frame, with fallback if one stream missing mid-video.
-        have_rgb = rgb_arr is not None
-        have_th = th_arr is not None
+        logits = None
+        have_rgb = fr is not None
+        have_th = th_fr is not None
 
         mode_used = None
         for m in pref:
@@ -410,65 +411,132 @@ def run_video_inference(
             pbar.update(1)
             continue
 
-        # Build input tensor for selected model
         if mode_used == "fusion":
-            if enable_modal_agreement and have_rgb and have_th:
-                modal_agreement = _safe_corr2d(rgb_arr.mean(axis=0), th_arr[0])
-            x_np = np.concatenate([rgb_arr, th_arr], axis=0)
             model_pack = models["fusion"]
         elif mode_used == "rgb":
-            if "rgb" in models:
-                x_np = rgb_arr
-                model_pack = models["rgb"]
-            else:
-                # fusion fallback with missing thermal = zeros
-                z = np.zeros((1, rgb_arr.shape[1], rgb_arr.shape[2]), dtype=np.float32)
-                x_np = np.concatenate([rgb_arr, z], axis=0)
-                model_pack = models["fusion"]
-        else:  # thermal
-            if "thermal" in models:
-                x_np = th_arr
-                model_pack = models["thermal"]
-            else:
-                # fusion fallback with missing rgb = zeros
-                z = np.zeros((3, th_arr.shape[1], th_arr.shape[2]), dtype=np.float32)
-                x_np = np.concatenate([z, th_arr], axis=0)
-                model_pack = models["fusion"]
-
-        model = model_pack["model"]
-        temperature = float(model_pack["temp"])
-        thr = float(model_pack["thr"])
-        if override_thr is not None:
-            thr = float(override_thr)
-        base_for_overlay = rgb_base
-        perf["preprocess_s"] += time.perf_counter() - t_pre0
-
-        t_inf0 = time.perf_counter()
-        probs_tta = []
-        if cam_extractor is not None:
-            # Grad-CAM hooks need activations with grad; no_grad breaks register_hook.
-            x = _to_device_batch(x_np, device=device)
-            x_in = x.detach().clone().requires_grad_(True)
-            with torch.enable_grad():
-                logits = model(x_in)
-                scores_cal = logits / max(1e-6, temperature)
-                prob_raw = torch.softmax(scores_cal, dim=1)[0, 1].item()
-                probs_tta.append(prob_raw)
-                if use_tta:
-                    x_flip = torch.flip(x.detach().clone().requires_grad_(True), dims=[3])
-                    logits_f = model(x_flip)
-                    scores_cal_f = logits_f / max(1e-6, temperature)
-                    prob_f = torch.softmax(scores_cal_f, dim=1)[0, 1].item()
-                    probs_tta.append(prob_f)
+            model_pack = models["rgb"] if "rgb" in models else models["fusion"]
         else:
-            with torch.inference_mode():
+            model_pack = models["thermal"] if "thermal" in models else models["fusion"]
+
+        thr_run = float(model_pack["thr"])
+        if override_thr is not None:
+            thr_run = float(override_thr)
+        temperature = float(model_pack["temp"])
+        prior_internal_alarm = alarm_machine.state
+
+        hist_curr = _gray_hist_vec(small_gray, bins=rtp.hist_bins)
+        mean_gray = float(np.mean(small_gray))
+        hot_frac = float(np.mean((small_gray > 0.85).astype(np.float32)))
+        pix_mae = float(mae_scene if prev_gray is not None else 1.0)
+        mono_now = float(time.monotonic())
+
+        dec_sample = rtp.decide(
+            mono_now=mono_now,
+            fps=float(fps),
+            internal_alarm_prior=prior_internal_alarm,
+            scene_changed=bool(scene_changed),
+            pix_mae_vs_prev_gray=float(pix_mae),
+            mae_motion_baseline_hint=float(scene_thresh),
+            hist_curr=hist_curr,
+            mean_gray=float(mean_gray),
+            hot_frac=float(hot_frac),
+            last_smoothed_prob=float(last_carry_prob_smooth),
+            last_raw_prob=float(last_carry_raw),
+            operating_thr_proxy=float(thr_run),
+            cam_hotspot_delta=None,
+        )
+        if dec_sample.skipped_similar:
+            perf["rt_skipped_similar"] += 1
+        if dec_sample.skipped_budget:
+            perf["rt_skipped_budget"] += 1
+
+        inferred = bool(dec_sample.run_model)
+        skipped_similar = bool(dec_sample.skipped_similar)
+        skipped_budget = bool(dec_sample.skipped_budget)
+        inferred_i = int(inferred)
+
+        perf["decode_frames"] += 1
+
+        heat_path = mask_path = polygon_path = ""
+        mean_intensity = top10 = area60 = 0.0
+        largest_component_area = 0.0
+        num_components = centroid_x = centroid_y = growth_rate = 0.0
+        cam_ok_frame = False
+        cam_for_stats = None
+        track_id = 0
+
+        t_pre0 = time.perf_counter()
+        if inferred:
+            rgb_arr = rgb_base = None
+            th_arr = None
+            if fr is not None:
+                rgb_arr, rgb_base = prep_rgb(fr, size=size)
+            if th_fr is not None:
+                th_arr, _ = prep_thermal(th_fr, size=size)
+            have_rgb_t = rgb_arr is not None
+            have_th_t = th_arr is not None
+            assert have_rgb == have_rgb_t and have_th == have_th_t
+
+            if mode_used == "fusion":
+                if enable_modal_agreement and have_rgb_t and have_th_t:
+                    modal_agreement = _safe_corr2d(rgb_arr.mean(axis=0), th_arr[0])
+                x_np = np.concatenate([rgb_arr, th_arr], axis=0)
+            elif mode_used == "rgb":
+                if "rgb" in models:
+                    x_np = rgb_arr
+                else:
+                    z = np.zeros((1, rgb_arr.shape[1], rgb_arr.shape[2]), dtype=np.float32)
+                    x_np = np.concatenate([rgb_arr, z], axis=0)
+            else:
+                if "thermal" in models:
+                    x_np = th_arr
+                else:
+                    z = np.zeros((3, th_arr.shape[1], th_arr.shape[2]), dtype=np.float32)
+                    x_np = np.concatenate([z, th_arr], axis=0)
+
+            model = model_pack["model"]
+            base_for_overlay = rgb_base
+            perf["preprocess_s"] += time.perf_counter() - t_pre0
+            perf["infer_calls"] += 1
+
+            t_inf0 = time.perf_counter()
+            probs_tta = []
+            if cam_extractor is not None:
                 x = _to_device_batch(x_np, device=device)
-                if amp_cuda:
-                    try:
-                        autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.float16)
-                    except (TypeError, AttributeError):
-                        autocast_ctx = torch.cuda.amp.autocast(dtype=torch.float16)
-                    with autocast_ctx:
+                x_in = x.detach().clone().requires_grad_(True)
+                with torch.enable_grad():
+                    logits = model(x_in)
+                    scores_cal = logits / max(1e-6, temperature)
+                    prob_raw = torch.softmax(scores_cal, dim=1)[0, 1].item()
+                    probs_tta.append(prob_raw)
+                    if use_tta:
+                        x_flip = torch.flip(x.detach().clone().requires_grad_(True), dims=[3])
+                        logits_f = model(x_flip)
+                        scores_cal_f = logits_f / max(1e-6, temperature)
+                        prob_f = torch.softmax(scores_cal_f, dim=1)[0, 1].item()
+                        probs_tta.append(prob_f)
+            else:
+                with torch.inference_mode():
+                    x = _to_device_batch(x_np, device=device)
+                    if amp_cuda:
+                        try:
+                            autocast_ctx = torch.amp.autocast(
+                                device_type="cuda", dtype=torch.float16
+                            )
+                        except (TypeError, AttributeError):
+                            autocast_ctx = torch.cuda.amp.autocast(dtype=torch.float16)
+                        with autocast_ctx:
+                            logits = model(x)
+                            scores_cal = logits / max(1e-6, temperature)
+                            prob_raw = torch.softmax(scores_cal, dim=1)[0, 1].item()
+                            probs_tta.append(prob_raw)
+                            if use_tta:
+                                x_flip = torch.flip(x, dims=[3])
+                                logits_f = model(x_flip)
+                                scores_cal_f = logits_f / max(1e-6, temperature)
+                                prob_f = torch.softmax(scores_cal_f, dim=1)[0, 1].item()
+                                probs_tta.append(prob_f)
+                    else:
                         logits = model(x)
                         scores_cal = logits / max(1e-6, temperature)
                         prob_raw = torch.softmax(scores_cal, dim=1)[0, 1].item()
@@ -479,31 +547,90 @@ def run_video_inference(
                             scores_cal_f = logits_f / max(1e-6, temperature)
                             prob_f = torch.softmax(scores_cal_f, dim=1)[0, 1].item()
                             probs_tta.append(prob_f)
-                else:
-                    logits = model(x)
-                    scores_cal = logits / max(1e-6, temperature)
-                    prob_raw = torch.softmax(scores_cal, dim=1)[0, 1].item()
-                    probs_tta.append(prob_raw)
-                    if use_tta:
-                        x_flip = torch.flip(x, dims=[3])
-                        logits_f = model(x_flip)
-                        scores_cal_f = logits_f / max(1e-6, temperature)
-                        prob_f = torch.softmax(scores_cal_f, dim=1)[0, 1].item()
-                        probs_tta.append(prob_f)
-        perf["infer_s"] += time.perf_counter() - t_inf0
-        prob_model = float(np.mean(probs_tta))
-        prob_post = (
-            prob_model * float(scene_conf_scale)
-            if (temporal_guard and scene_changed)
-            else prob_model
-        )
-        if (
-            mode_used == "fusion"
-            and enable_modal_agreement
-            and modal_agreement == modal_agreement
-            and modal_agreement < float(modal_agreement_min_corr)
-        ):
-            prob_post *= float(modal_agreement_penalty)
+
+            perf["infer_s"] += time.perf_counter() - t_inf0
+            prob_model = float(np.mean(probs_tta))
+            prob_post = (
+                prob_model * float(scene_conf_scale)
+                if (temporal_guard and scene_changed)
+                else prob_model
+            )
+            if (
+                mode_used == "fusion"
+                and enable_modal_agreement
+                and modal_agreement == modal_agreement
+                and modal_agreement < float(modal_agreement_min_corr)
+            ):
+                prob_post *= float(modal_agreement_penalty)
+
+            if cam_extractor is not None and logits is not None:
+                try:
+                    cam = cam_extractor(class_idx=1, scores=logits)[0].squeeze().detach().cpu().numpy()
+                    cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-6)
+                    if mask_ema is None:
+                        mask_ema = cam.astype(np.float32)
+                    else:
+                        mask_ema = float(ema_alpha) * mask_ema + (
+                            1.0 - float(ema_alpha)
+                        ) * cam.astype(np.float32)
+                    cam_for_stats = mask_ema
+                    mean_intensity = float(cam_for_stats.mean())
+                    flat = cam_for_stats.ravel()
+                    k10 = max(1, int(0.1 * flat.size))
+                    top10 = float(np.mean(np.partition(flat, flat.size - k10)[-k10:]))
+                    area60 = float((cam_for_stats > 0.6).mean())
+                    st = stats_from_soft_map(cam_for_stats)
+                    largest_component_area = float(st["largest_component_area"])
+                    num_components = int(st["num_components"])
+                    centroid_x = float(st["centroid_x_norm"])
+                    centroid_y = float(st["centroid_y_norm"])
+                    growth_rate = float(largest_component_area - prev_largest_area)
+                    prev_largest_area = largest_component_area
+                    track_id = 1 if largest_component_area > 0.002 else 0
+                    if rgb_base is not None and save_heatmaps:
+                        H, W = rgb_base.shape[:2]
+                        cam_resized = cv2.resize(cam_for_stats, (W, H), interpolation=cv2.INTER_CUBIC)
+                        cam_u8 = (np.clip(cam_resized, 0, 1) * 255).astype(np.uint8)
+                        heat_colored = cv2.applyColorMap(cam_u8, cv2.COLORMAP_JET)
+                        heat_colored = cv2.cvtColor(heat_colored, cv2.COLOR_BGR2RGB)
+                        overlay = (0.6 * rgb_base + 0.4 * heat_colored).astype(np.uint8)
+                        heat_path = str(heatmap_dir / f"frame_{idx:06d}.png")
+                        Image.fromarray(overlay).save(heat_path)
+                    if rgb_base is not None and save_masks:
+                        H, W = rgb_base.shape[:2]
+                        m_u8 = (
+                            np.clip(cv2.resize(cam_for_stats, (W, H)), 0, 1) * 255
+                        ).astype(np.uint8)
+                        mask_path = str(mask_dir / f"frame_{idx:06d}.png")
+                        Image.fromarray(m_u8).save(mask_path)
+                    if save_polygons and num_components > 0:
+                        poly = {
+                            "frame_idx": int(idx),
+                            "centroid_x_norm": centroid_x,
+                            "centroid_y_norm": centroid_y,
+                            "largest_component_area": largest_component_area,
+                            "num_components": num_components,
+                        }
+                        polygon_path = str(polygon_dir / f"frame_{idx:06d}.json")
+                        with open(polygon_path, "w", encoding="utf-8") as fw:
+                            json.dump(poly, fw)
+                    cam_ok_frame = True
+                except Exception:
+                    pass
+
+            last_carry_largest = float(largest_component_area)
+
+        else:
+            perf["preprocess_s"] += time.perf_counter() - t_pre0
+            logits = None
+            prob_model = float(last_carry_raw)
+            prob_post = (
+                prob_model * float(scene_conf_scale)
+                if (temporal_guard and scene_changed)
+                else prob_model
+            )
+            largest_component_area = float(last_carry_largest)
+
         if temporal_guard and scene_changed:
             ema_prob = prob_post
             prob_buffer.clear()
@@ -516,7 +643,7 @@ def run_video_inference(
         prob_ma = float(np.mean(prob_buffer)) if prob_buffer else float(prob_post)
         blend_w = float(np.clip(prob_temporal_blend, 0.0, 1.0))
         prob_smooth = (1.0 - blend_w) * float(ema_prob) + blend_w * prob_ma
-        burst_thr = float(thr) * burst_threshold_frac_eff
+        burst_thr = float(thr_run) * burst_threshold_frac_eff
         if prob_ma >= burst_thr:
             burst_run += 1
         else:
@@ -526,162 +653,124 @@ def run_video_inference(
         prob_fire_ma_val = float(prob_ma)
         prob = float(prob_smooth)
 
-        mean_intensity = 0.0
-        top10 = 0.0
-        area60 = 0.0
-        heat_path = ""
-        mask_path = ""
-        polygon_path = ""
-        largest_component_area = 0.0
-        num_components = 0
-        centroid_x = 0.0
-        centroid_y = 0.0
-        growth_rate = 0.0
-        cam_for_stats = None
-        cam_ok_frame = False
-        if cam_extractor is not None and logits is not None:
-            try:
-                cam = cam_extractor(class_idx=1, scores=logits)[0].squeeze().detach().cpu().numpy()
-                cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-6)
-                if mask_ema is None:
-                    mask_ema = cam.astype(np.float32)
-                else:
-                    mask_ema = float(ema_alpha) * mask_ema + (1.0 - float(ema_alpha)) * cam.astype(np.float32)
-                cam_for_stats = mask_ema
-                mean_intensity = float(cam_for_stats.mean())
-                # Faster than full sort: top 10% mean via partition.
-                flat = cam_for_stats.ravel()
-                k10 = max(1, int(0.1 * flat.size))
-                top10 = float(np.mean(np.partition(flat, flat.size - k10)[-k10:]))
-                area60 = float((cam_for_stats > 0.6).mean())
-                st = stats_from_soft_map(cam_for_stats)
-                largest_component_area = float(st["largest_component_area"])
-                num_components = int(st["num_components"])
-                centroid_x = float(st["centroid_x_norm"])
-                centroid_y = float(st["centroid_y_norm"])
-                growth_rate = float(largest_component_area - prev_largest_area)
-                prev_largest_area = largest_component_area
-                track_id = 1 if largest_component_area > 0.002 else 0
-                if save_heatmaps:
-                    H, W = base_for_overlay.shape[:2]
-                    cam_resized = cv2.resize(cam_for_stats, (W, H), interpolation=cv2.INTER_CUBIC)
-                    cam_u8 = (np.clip(cam_resized, 0, 1) * 255).astype(np.uint8)
-                    heat_colored = cv2.applyColorMap(cam_u8, cv2.COLORMAP_JET)
-                    heat_colored = cv2.cvtColor(heat_colored, cv2.COLOR_BGR2RGB)
-                    overlay = (0.6 * base_for_overlay + 0.4 * heat_colored).astype(np.uint8)
-                    heat_path = str(heatmap_dir / f"frame_{idx:06d}.png")
-                    Image.fromarray(overlay).save(heat_path)
-                if save_masks:
-                    H, W = base_for_overlay.shape[:2]
-                    m_u8 = (np.clip(cv2.resize(cam_for_stats, (W, H)), 0, 1) * 255).astype(np.uint8)
-                    mask_path = str(mask_dir / f"frame_{idx:06d}.png")
-                    Image.fromarray(m_u8).save(mask_path)
-                if save_polygons and num_components > 0:
-                    poly = {
-                        "frame_idx": int(idx),
-                        "centroid_x_norm": centroid_x,
-                        "centroid_y_norm": centroid_y,
-                        "largest_component_area": largest_component_area,
-                        "num_components": num_components,
-                    }
-                    polygon_path = str(polygon_dir / f"frame_{idx:06d}.json")
-                    with open(polygon_path, "w", encoding="utf-8") as f:
-                        json.dump(poly, f)
-                cam_ok_frame = True
-            except Exception:
-                pass
-
         decision_prob = float(prob)
         t_post0 = time.perf_counter()
         if temporal_guard:
             if (
-                cam_ok_frame
+                inferred
+                and cam_ok_frame
                 and 0.0 < float(largest_component_area) < float(small_fire_area_max)
             ):
                 decision_prob *= float(small_fire_boost)
             if (
-                cam_ok_frame
+                inferred
+                and cam_ok_frame
                 and float(min_component_area) > 0.0
                 and largest_component_area < float(min_component_area)
             ):
                 decision_prob = min(decision_prob, float(hyst_low_eff) - 0.01)
-            if cam_ok_frame and n_processed > 0:
+            if inferred and cam_ok_frame and n_processed > 0:
                 if growth_rate > 0:
                     decision_prob *= float(growth_upscale)
                 else:
                     decision_prob *= float(growth_downscale)
-            if (
-                decision_prob < float(texture_prob_max)
-                and top10 > float(texture_top10_min)
+            if inferred and (
+                decision_prob < float(texture_prob_max) and top10 > float(texture_top10_min)
             ):
                 decision_prob = 0.0
+            if not inferred:
+                decision_prob = float(last_carry_decision_prob)
             decision_prob = float(np.clip(decision_prob, 0.0, 1.0))
 
+            pulse_pre = alarm_machine.state
             state, fire_event, alarm_conf, alarm_reason = alarm_machine.update(
                 decision_prob=decision_prob,
                 top10_intensity=top10,
                 largest_component_area=largest_component_area,
                 scene_changed=scene_changed,
             )
+            rtp.pulse_alarm_burst(time.monotonic(), pulse_pre, state)
+
             hyst_fire = state in ("suspected", "confirmed")
             persist_run = int(alarm_machine._high_run)
-            # frame-level prediction uses the model's own threshold
-            pred_fire = int(float(prob) >= float(thr))
+            pred_fire = int(float(prob) >= float(thr_run))
         else:
-            # Still write compatible fields
-            pred_fire = int(float(prob) >= float(thr))
+            pulse_pre = alarm_machine.state  # noqa: F841
+            pred_fire = int(float(prob) >= float(thr_run))
             fire_event = 0
             persist_run = 0
             state = "idle"
             alarm_conf = float(prob)
             alarm_reason = "temporal_guard_disabled"
 
+        rtp.finalize_frame_observer(
+            gray_01=small_gray,
+            mean_gray=float(mean_gray),
+            hot_frac=float(hot_frac),
+            hist_vec=hist_curr,
+        )
+
+        last_carry_raw = float(prob_model)
+        last_carry_prob_smooth = float(prob)
+        last_carry_ma_val = float(prob_ma)
+        last_carry_ema_val = float(ema_prob)
+        last_carry_decision_prob = float(decision_prob)
+
         prev_gray = small_gray.copy()
         n_processed += 1
         perf["processed_frames"] += 1
         perf["postprocess_s"] += time.perf_counter() - t_post0
 
-        rows.append({
-            "frame_idx": idx,
-            "timestamp_sec": float(idx) / float(fps),
-            "prob_fire_raw": prob_model,
-            "prob_fire_ma": prob_fire_ma_val,
-            "prob_fire_ema": prob_fire_ema_val,
-            "prob_fire": prob,
-            "burst_run_len": int(burst_run),
-            "pred_fire_burst_consec": pred_fire_burst,
-            "decision_prob": decision_prob,
-            "pred_fire": pred_fire,
-            "mode_used": str(mode_used),
-            "threshold_used": thr,
-            "hyst_high_used": float(hyst_high_eff),
-            "hyst_low_used": float(hyst_low_eff),
-            "persist_n_used": int(persist_target),
-            "early_detection": int(bool(early_detection)),
-            "infer_temporal_applied": int(bool(temporal_guard)),
-            "scene_changed": int(bool(scene_changed)),
-            "modal_agreement": float(modal_agreement) if modal_agreement == modal_agreement else "",
-            "mae_scene": mae_scene,
-            "kl_scene": kl_scene,
-            "hyst_fire": int(bool(hyst_fire)),
-            "fire_run_len": int(persist_run),
-            "fire_event": int(fire_event),
-            "intensity_mean": mean_intensity,
-            "intensity_top10": top10,
-            "area_heat_gt_0_6": area60,
-            "heatmap_path": heat_path,
-            "mask_path": mask_path,
-            "polygon_path": polygon_path,
-            "largest_component_area": largest_component_area,
-            "num_components": num_components,
-            "centroid_x": centroid_x,
-            "centroid_y": centroid_y,
-            "growth_rate": growth_rate,
-            "track_id": int(track_id),
-            "alarm_state": state,
-            "alarm_confidence": float(alarm_conf),
-            "alarm_reason": alarm_reason,
-        })
+        rows.append(
+            {
+                "frame_idx": idx,
+                "sampled_frame_idx": idx,
+                "timestamp_sec": float(idx) / float(fps),
+                "inferred": inferred_i,
+                "skipped_similar": int(skipped_similar),
+                "skipped_budget": int(skipped_budget),
+                "rt_reason": str(dec_sample.reason),
+                "prob_fire_raw": prob_model,
+                "prob_fire_ma": prob_fire_ma_val,
+                "prob_fire_ema": prob_fire_ema_val,
+                "prob_fire": prob,
+                "burst_run_len": int(burst_run),
+                "pred_fire_burst_consec": int(pred_fire_burst),
+                "decision_prob": decision_prob,
+                "pred_fire": pred_fire,
+                "mode_used": str(mode_used),
+                "threshold_used": thr_run,
+                "hyst_high_used": float(hyst_high_eff),
+                "hyst_low_used": float(hyst_low_eff),
+                "persist_n_used": int(persist_target),
+                "early_detection": int(bool(early_detection)),
+                "infer_temporal_applied": int(bool(temporal_guard)),
+                "scene_changed": int(bool(scene_changed)),
+                "modal_agreement": (
+                    float(modal_agreement) if modal_agreement == modal_agreement else ""
+                ),
+                "mae_scene": mae_scene,
+                "kl_scene": kl_scene,
+                "hyst_fire": int(bool(hyst_fire)),
+                "fire_run_len": int(persist_run),
+                "fire_event": int(fire_event),
+                "intensity_mean": mean_intensity,
+                "intensity_top10": top10,
+                "area_heat_gt_0_6": area60,
+                "heatmap_path": heat_path,
+                "mask_path": mask_path,
+                "polygon_path": polygon_path,
+                "largest_component_area": largest_component_area,
+                "num_components": num_components,
+                "centroid_x": centroid_x,
+                "centroid_y": centroid_y,
+                "growth_rate": growth_rate,
+                "track_id": int(track_id),
+                "alarm_state": state,
+                "alarm_confidence": float(alarm_conf),
+                "alarm_reason": alarm_reason,
+            }
+        )
         if export_alarm_feed:
             ts_row = float(idx) / float(fps)
             pub = public_alarm_state(state, temporal_guard=temporal_guard)
@@ -702,53 +791,20 @@ def run_video_inference(
                     temporal_guard=temporal_guard,
                     pred_fire_burst=int(pred_fire_burst),
                     episode_start_ts=esp,
+                    inferred=inferred_i,
+                    skipped_similar=int(skipped_similar),
+                    skipped_budget=int(skipped_budget),
                 )
             )
         if progress_callback is not None:
             try:
-                est: int | None
-                if total > 0:
-                    if adaptive_step:
-                        # Üst sınır: adaptif modda en küçük adım (min_step) ile en çok kaç çıktı satırı
-                        min_sf = max(1, int(adaptive_min_step))
-                        est = max(1, int((total + min_sf - 1) // min_sf))
-                    else:
-                        sf = max(1, int(step_frames))
-                        est = max(1, int((total + sf - 1) // sf))
-                else:
-                    est = None
+                est = int(total) if total > 0 else None
                 progress_callback(int(len(rows)), est)
             except Exception:
                 pass
         idx += 1
         pbar.update(1)
 
-        step_now = step
-        if adaptive_step:
-            step_now = sampler.update(
-                motion_mae=float(mae_scene),
-                decision_prob=float(decision_prob),
-                alarm_state=state,
-            )
-
-        if step_now > 1:
-            reached_end = False
-            for _ in range(step_now - 1):
-                t_dec_skip0 = time.perf_counter()
-                ok_skip = True
-                if cap_rgb is not None:
-                    ok_skip = cap_rgb.grab()
-                if cap_th is not None:
-                    cap_th.grab()
-                if not ok_skip:
-                    reached_end = True
-                    break
-                perf["decode_s"] += time.perf_counter() - t_dec_skip0
-                idx += 1
-                pbar.update(1)
-                perf["skipped_frames"] += 1
-            if reached_end:
-                break
 
     pbar.close()
     if cap_rgb is not None:
@@ -781,7 +837,9 @@ def run_video_inference(
             + str(n_fire_event)
             + f" mode_counts={mode_counts} temporal_guard={bool(temporal_guard)} "
             + f"hyst_high={float(hyst_high_eff):.3f} hyst_low={float(hyst_low_eff):.3f} persist_n={int(persist_target)} "
-            + f"step={int(step_frames)} inferred_step_now={step} adaptive_step={bool(adaptive_step)} "
+            + f"infer_calls={int(perf.get('infer_calls', 0))} skipped_similar_rt={int(perf.get('rt_skipped_similar', 0))} "
+            + f"skipped_budget_rt={int(perf.get('rt_skipped_budget', 0))} decode_frames={int(perf.get('decode_frames', 0))} "
+            + f"target_infer_hz={float(target_infer_hz):.3f} max_infer_gap_sec={float(max_infer_gap_sec):.3f} "
             + f"prob_temporal_blend={prob_temporal_blend}"
         )
     except Exception:
@@ -794,7 +852,12 @@ def run_video_inference(
         df_out = pd.DataFrame(
             columns=[
                 "frame_idx",
+                "sampled_frame_idx",
                 "timestamp_sec",
+                "inferred",
+                "skipped_similar",
+                "skipped_budget",
+                "rt_reason",
                 "prob_fire_raw",
                 "prob_fire_ma",
                 "prob_fire_ema",
@@ -845,6 +908,12 @@ def run_video_inference(
             "device": str(device),
             "processed_frames": int(perf["processed_frames"]),
             "skipped_frames": int(perf["skipped_frames"]),
+            "decode_frames": int(perf.get("decode_frames", 0)),
+            "infer_calls": int(perf.get("infer_calls", 0)),
+            "rt_skipped_similar": int(perf.get("rt_skipped_similar", 0)),
+            "rt_skipped_budget": int(perf.get("rt_skipped_budget", 0)),
+            "target_infer_hz": float(target_infer_hz),
+            "max_infer_gap_sec": float(max_infer_gap_sec),
             "decode_s": float(perf["decode_s"]),
             "preprocess_s": float(perf["preprocess_s"]),
             "infer_s": float(perf["infer_s"]),

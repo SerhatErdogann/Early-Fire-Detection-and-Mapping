@@ -9,6 +9,7 @@ except Exception:  # pragma: no cover
     INFERENCE_DEFAULT = {}
 
 # Streamlit varsayılan çıkarım argümanları (tek profil; CLI farklı parametre kullanabilir).
+# Video örnekleme DroneRTStreamPolicy ile seçicidir — adaptif atlama parametreleri yok sayılır.
 DEFAULT_INFER_UI_ARGS: dict[str, Any] = {
     "size": 224,
     "step": 6,
@@ -16,10 +17,9 @@ DEFAULT_INFER_UI_ARGS: dict[str, Any] = {
     "ema_alpha": 0.30,
     "tta": True,
     "fp16": True,
-    "adaptive_step": True,
-    "adaptive_min_step": 2,
-    "adaptive_max_step": 12,
     "temporal_guard": True,
+    "target_infer_hz": 1.0,
+    "max_infer_gap_sec": 1.0,
     "min_component_area": float(INFERENCE_DEFAULT.get("min_component_area", 0.01) or 0.01),
     "texture_prob_max": float(INFERENCE_DEFAULT.get("texture_prob_max", 0.2) or 0.2),
     "small_fire_boost": float(INFERENCE_DEFAULT.get("small_fire_boost", 1.3) or 1.3),
@@ -27,7 +27,6 @@ DEFAULT_INFER_UI_ARGS: dict[str, Any] = {
     "prob_temporal_blend": 0.2,
     "burst_min_frames": 3,
     "burst_threshold_frac": 1.0,
-    "auto_step_long_video": True,
     "stream_buffer_reduce": True,
 }
 

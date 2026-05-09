@@ -152,6 +152,18 @@ def main():
         action="store_true",
         help="Mapping/GIS downstream: alarm_feed CSV+JSONL yazılmasın.",
     )
+    ap.add_argument(
+        "--target-infer-hz",
+        type=float,
+        default=1.0,
+        help="Seçici çıkarım: hedef yaklaşık model çağrı sıklığı (Hz). Drone/canlı için ~1 önerilir.",
+    )
+    ap.add_argument(
+        "--max-infer-gap-sec",
+        type=float,
+        default=1.0,
+        help="Kalp atımı: güvenlik için bu süreyi geçmeden çıkarımsız kalmayı engelle.",
+    )
     args = ap.parse_args()
 
     if not args.rgb_video and not args.th_video:
@@ -216,6 +228,8 @@ def main():
         stream_buffer_reduce=bool(args.stream_buffer_reduce),
         infer_batch_size=int(args.infer_batch_size),
         export_alarm_feed=not bool(args.no_alarm_feed_export),
+        target_infer_hz=float(args.target_infer_hz),
+        max_infer_gap_sec=float(args.max_infer_gap_sec),
     )
     print("Output written:", out_csv)
     if not args.no_alarm_feed_export:

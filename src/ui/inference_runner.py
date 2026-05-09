@@ -55,9 +55,8 @@ def run_analysis_pipeline(
         out_csv=str(pred_csv),
         use_fp16=bool(a.get("fp16", False)),
         temporal_guard=bool(a.get("temporal_guard", True)),
-        adaptive_step=bool(a.get("adaptive_step", True)),
-        adaptive_min_step=int(a.get("adaptive_min_step", 1)),
-        adaptive_max_step=int(a.get("adaptive_max_step", 12)),
+        adaptive_step=False,
+        auto_step_long_video=False,
         min_component_area=float(a.get("min_component_area", 0.01)),
         texture_prob_max=float(a.get("texture_prob_max", INFERENCE_DEFAULT.get("texture_prob_max", 0.2))),
         small_fire_boost=float(a.get("small_fire_boost", INFERENCE_DEFAULT.get("small_fire_boost", 1.3))),
@@ -67,9 +66,10 @@ def run_analysis_pipeline(
         prob_temporal_blend=float(a.get("prob_temporal_blend", 0.0)),
         burst_min_frames=int(a.get("burst_min_frames", 3)),
         burst_threshold_frac=float(a.get("burst_threshold_frac", 1.0)),
-        auto_step_long_video=bool(a.get("auto_step_long_video", False)),
         stream_buffer_reduce=bool(a.get("stream_buffer_reduce", True)),
         progress_callback=progress_callback,
+        target_infer_hz=float(a.get("target_infer_hz", 1.0)),
+        max_infer_gap_sec=float(a.get("max_infer_gap_sec", 1.0)),
     )
     try:
         df_pred = pd.read_csv(pred_csv)

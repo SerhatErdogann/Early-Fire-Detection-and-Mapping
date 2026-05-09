@@ -188,6 +188,60 @@ def _render_home(
     return False, None
 
 
+def _median_frame_spacing_sec(ts: pd.Series) -> float:
+    t = pd.to_numeric(ts, errors="coerce").dropna()
+    if len(t) < 2:
+        return 1.0 / 30.0
+    d = t.diff().dropna()
+    if d.empty:
+        return 1.0 / 30.0
+    m = float(d.median())
+    return m if m > 1e-9 else 1.0 / 30.0
+
+
+def _alarm_active_duration_sec(df: pd.DataFrame) -> float:
+    """Şüpheli/onaylı süreler için kaba süre (satırların timestamp aralığı ile)."""
+    if df.empty or "timestamp_sec" not in df.columns or "alarm_state" not in df.columns:
+        return 0.0
+    d = df.sort_values("frame_idx").reset_index(drop=True)
+    ts = pd.to_numeric(d["timestamp_sec"], errors="coerce")
+    dt = _median_frame_spacing_sec(ts)
+    active = d["alarm_state"].astype(str).str.lower().isin(["suspected", "confirmed"])
+    total = 0.0
+    in_alarm = False
+    seg_start = 0.0
+    last_t = 0.0
+    for i in range(len(d)):
+        ti = ts.iloc[i]
+        if pd.isna(ti):
+            continue
+        t = float(ti)
+        last_t = t
+        a = bool(active.iloc[i])
+        if a and not in_alarm:
+            in_alarm = True
+            seg_start = t
+        elif (not a) and in_alarm:
+            total += max(dt, t - seg_start)
+            in_alarm = False
+    if in_alarm:
+        total += max(dt, last_t - seg_start + dt)
+    return float(total)
+
+
+def _load_benchmark_dict(result: dict[str, Any]) -> dict[str, Any]:
+    p = result.get("benchmark_json")
+    if not p:
+        return {}
+    bp = Path(str(p))
+    if not bp.is_file():
+        return {}
+    try:
+        return json.loads(bp.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 def _run_with_progress(
     cfg: dict[str, Any],
     out_dir: Path,
@@ -311,6 +365,37 @@ def _render_analysis_dashboard(
         st.caption(
             "_Eşik çizgileri: alarm (yüksek uyarı) ve inceleme (orta) düzeyidir._"
         )
+
+        bench = _load_benchmark_dict(result)
+        n_infer = int(bench.get("infer_calls") or 0)
+        n_sim = int(bench.get("rt_skipped_similar") or 0)
+        n_budget = int(bench.get("rt_skipped_budget") or 0)
+        n_decoded = int(bench.get("decode_frames") or 0)
+        if not bench:
+            if "inferred" in df_scored.columns:
+                n_infer = int(pd.to_numeric(df_scored["inferred"], errors="coerce").fillna(0).sum())
+            if "skipped_similar" in df_scored.columns:
+                n_sim = int(pd.to_numeric(df_scored["skipped_similar"], errors="coerce").fillna(0).sum())
+            n_decoded = len(df_scored)
+        elif n_decoded <= 0:
+            n_decoded = len(df_scored)
+        alarm_sec = _alarm_active_duration_sec(df_scored)
+
+        with st.expander("Akış ve seçici çıkarım (RT / drone)", expanded=False):
+            render_metric_row(
+                [
+                    ("Toplam işlenen kare", str(max(n_decoded, len(df_scored)))),
+                    ("Model çıkarımı", str(n_infer)),
+                    ("Benzer kare nedeniyle atlanan", str(n_sim)),
+                    ("Hız hedefi yüzünden ertelenen", str(n_budget)),
+                    ("Yaklaşık aktif alarm süresi", f"{alarm_sec:.1f} s"),
+                ]
+            )
+            if bench:
+                st.caption(
+                    f"Hedef çıkarım ≈ `{bench.get('target_infer_hz')}` Hz · "
+                    f"En uzun çıkarımsız pencere ≤ `{bench.get('max_infer_gap_sec')}` sn"
+                )
 
     st.markdown("---")
     st.subheader("Özet rapor")
