@@ -1,12 +1,15 @@
 """
 Video inference with optional EMA smoothing and TTA for more stable predictions on drone footage.
 """
+from __future__ import annotations
+
 import json
 import time
 import cv2
 import numpy as np
 import pandas as pd
 import torch
+from collections.abc import Callable
 from pathlib import Path
 from tqdm import tqdm
 from PIL import Image
@@ -125,6 +128,7 @@ def run_video_inference(
     max_step_cap: int = 64,
     stream_buffer_reduce: bool = True,
     infer_batch_size: int = 1,
+    progress_callback: Callable[[int, int | None], None] | None = None,
 ):
     """
     Run fire classification on video (RGB only or RGB+thermal).
@@ -660,6 +664,16 @@ def run_video_inference(
             "alarm_confidence": float(alarm_conf),
             "alarm_reason": alarm_reason,
         })
+        if progress_callback is not None:
+            try:
+                est: int | None
+                if total > 0:
+                    est = max(1, int((total + max(1, int(step)) - 1) // max(1, int(step))))
+                else:
+                    est = None
+                progress_callback(int(len(rows)), est)
+            except Exception:
+                pass
         idx += 1
         pbar.update(1)
 
