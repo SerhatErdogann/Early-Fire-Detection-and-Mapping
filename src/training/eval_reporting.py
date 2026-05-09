@@ -375,18 +375,62 @@ def realistic_selection_score(vm: dict) -> float:
     return f1 + bal_acc + ap - 0.5 * fpr
 
 
-def recall_fpr_selection_key(vm: dict) -> tuple:
-    """Sorting key for model selection under ``recall_fpr`` policy.
+def operational_selection_score(vm: dict, *, ece: float, brier: float) -> float:
+    """Higher is better: emphasise recall and ranking quality, penalise FPR and miscalibration.
 
-    Lexicographically higher is better: prefer ``recall >= 0.98``, then higher
-    recall, lower FPR (via ``-FPR``), then balanced accuracy / F1.
+    Used for ``--selection_metric recall_fpr`` checkpoint picking and for post-hoc
+    ``improve_results.csv`` ranking alongside raw recall/FPR.
     """
-    rec = float(vm.get("recall") or 0.0)
-    fpr = float(vm.get("false_positive_rate") or 1.0)
-    bal = float(vm.get("bal_acc") or 0.0)
-    f1 = float(vm.get("f1") or 0.0)
+    r = _safe_metric(vm.get("recall"))
+    fpr = _safe_metric(vm.get("false_positive_rate"))
+    f1 = _safe_metric(vm.get("f1"))
+    bal = _safe_metric(vm.get("bal_acc"))
+    e = _safe_metric(ece)
+    br = _safe_metric(brier)
+    return 2.2 * r + 1.45 * f1 + 1.05 * bal - 2.75 * fpr - 0.85 * e - 0.42 * br
+
+
+def recall_fpr_selection_key(vm: dict, *, ece: float = 0.0, brier: float = 0.0) -> tuple:
+    """Sorting key for ``recall_fpr`` policy (epoch checkpoint selection).
+
+    Lexicographically higher is better:
+    1. ``recall >= 0.98`` (deployment safety gate)
+    2. :func:`operational_selection_score` (recall, F1, bal_acc, −FPR, −ECE, −Brier)
+    3. raw recall, −FPR, balanced accuracy, F1
+    """
+    rec = _safe_metric(vm.get("recall"))
+    fpr = _safe_metric(vm.get("false_positive_rate"))
+    bal = _safe_metric(vm.get("bal_acc"))
+    f1 = _safe_metric(vm.get("f1"))
     meets = int(rec >= 0.98)
-    return (meets, rec, -fpr, bal, f1)
+    op = operational_selection_score(vm, ece=ece, brier=brier)
+    return (meets, op, rec, -fpr, bal, f1)
+
+
+def operational_score_from_test_row(row: dict, *, ece_key: str = "val_ece", brier_key: str = "val_brier") -> float:
+    """Composite score from an ``improve_results.csv`` row using ``test_*`` metrics."""
+
+    def _cell_float(key: str, default: float) -> float:
+        v = row.get(key)
+        if v is None or v == "":
+            return default
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return default
+        if x != x or x in (float("inf"), float("-inf")):
+            return default
+        return x
+
+    vm = {
+        "recall": row.get("test_recall"),
+        "false_positive_rate": row.get("test_false_positive_rate"),
+        "f1": row.get("test_f1"),
+        "bal_acc": row.get("test_bal_acc"),
+    }
+    ece = _cell_float(ece_key, 0.08)
+    bri = _cell_float(brier_key, 0.08)
+    return operational_selection_score(vm, ece=ece, brier=bri)
 
 
 def sanitize_for_json(obj: Any) -> Any:

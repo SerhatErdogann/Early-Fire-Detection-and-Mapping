@@ -118,8 +118,9 @@ def main():
         choices=["f1_balacc", "realistic", "recall_fpr"],
         default="f1_balacc",
         help=(
-            "Checkpoint selection on val @ operating thr: f1_balacc, realistic, "
-            "or recall_fpr (prioritise recall>=0.98 then min FPR)."
+            "Checkpoint seçimi: f1_balacc, realistic "
+            "(F1+bal_acc+AP−Yanlış alarm cezası), veya recall_fpr "
+            "(önce yakalama kapısı, sonra bileşik puanlar: yakalama, FPR, ayırım, kalibrasyon)."
         ),
     )
     ap.add_argument(

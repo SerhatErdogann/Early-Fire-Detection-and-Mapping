@@ -1211,7 +1211,11 @@ def train_one_run(
 
         score_legacy = 0.5 * float(vm.get("f1", 0.0)) + 0.5 * float(vm.get("bal_acc", 0.0))
         score_realistic = realistic_selection_score(vm)
-        key_recall_fpr = recall_fpr_selection_key(vm) if sel_norm == "recall_fpr" else None
+        key_recall_fpr = (
+            recall_fpr_selection_key(vm, ece=float(ece), brier=float(brier))
+            if sel_norm == "recall_fpr"
+            else None
+        )
         if sel_norm == "realistic":
             selection_score = score_realistic
         elif sel_norm == "recall_fpr" and key_recall_fpr is not None:
@@ -1219,7 +1223,7 @@ def train_one_run(
         else:
             selection_score = score_legacy
 
-        # Checkpoint selection: f1_balacc | realistic | recall_fpr (prefer recall>=0.98, min FPR)
+        # Checkpoint selection: f1_balacc | realistic | recall_fpr (recall>=0.98 gate then operational composite)
         if sel_norm == "recall_fpr":
             improved = key_recall_fpr is not None and (
                 best_recall_fpr_key is None or key_recall_fpr > best_recall_fpr_key
@@ -1619,6 +1623,8 @@ def train_one_run(
                 row["threshold_saved"] = float(lastm.get("threshold", float("nan")))
                 row["worst_source_fpr"] = lastm.get("worst_source_by_fpr")
                 row["worst_source_recall"] = lastm.get("worst_source_by_recall")
+                row["val_ece"] = lastm.get("ece_val")
+                row["val_brier"] = lastm.get("brier_val")
             append_experiment_csv_row(str(experiment_log_csv), row)
             print(f"[train] experiment log -> {experiment_log_csv}")
         except Exception as ex:
