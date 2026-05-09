@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 import pandas as pd
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "2.0"
 
 AlarmStatePublic = Literal["ok", "suspected", "confirmed"]
 ConfidenceLevel = Literal["low", "medium", "high"]
@@ -25,11 +25,15 @@ RiskLevel = Literal["none", "medium", "high"]
 ALARM_FEED_COLUMNS: tuple[str, ...] = (
     "schema_version",
     "frame_idx",
+    "sampled_frame",
     "timestamp",
     "fire_probability",
     "smoothed_probability",
     "alarm_state",
     "fire_detected",
+    "inferred",
+    "skipped_similar",
+    "skipped_budget",
     "risk_level",
     "confidence_level",
     "first_alarm_ts",
@@ -51,6 +55,10 @@ ALARM_FEED_DOC: dict[str, Any] = {
         "risk_level": {"none": "ok", "medium": "suspected", "high": "confirmed"},
         "confidence_level": "low | medium | high — alarm_state ile uyumlu.",
         "burst_gate_active": "Ardışık kare burst eşiği (filtre) için bayrak.",
+        "sampled_frame": "İşlem gören dekode kare dizini (analiz/satır için referans).",
+        "inferred": "Bu satır için model çıkarımı yapıldıysa 1 — sonuç taşıma/bütçede 0.",
+        "skipped_similar": "Benzer kare nedeniyle model atlandıysa 1.",
+        "skipped_budget": "Hedef çıkarım hızına göre sıra dışında bütçelenmediyse 1.",
         "first_alarm_ts": "Bu satır için aktif uyarı süitinin başlangıç zamanı (clip saniye); uyarı yoksa boş.",
         "last_alarm_ts": "Uyarı süitinin son zamanı; uyarı yoksa boş.",
         "alarm_duration": "Uyarı süitinde geçen süre (saniye); uyarı yoksa 0.",
@@ -106,8 +114,13 @@ def alarm_feed_row_dict(
     pred_fire_burst: int,
     episode_start_ts: float | None,
     schema_version: str = SCHEMA_VERSION,
+    inferred: int = 1,
+    skipped_similar: int = 0,
+    skipped_budget: int = 0,
+    sampled_frame: int | None = None,
 ) -> dict[str, Any]:
     """Tek kare/satır için alarm feed kaydı (dict)."""
+    sf = int(frame_idx if sampled_frame is None else sampled_frame)
     pub = public_alarm_state(internal_alarm_state, temporal_guard=temporal_guard)
 
     ts = float(timestamp_sec)
@@ -125,11 +138,15 @@ def alarm_feed_row_dict(
     return {
         "schema_version": schema_version,
         "frame_idx": int(frame_idx),
+        "sampled_frame": sf,
         "timestamp": round(ts, 6),
         "fire_probability": round(float(fire_probability), 8),
         "smoothed_probability": round(float(smoothed_probability), 8),
         "alarm_state": pub,
         "fire_detected": bool(fire_detected_from_state(pub)),
+        "inferred": int(bool(inferred)),
+        "skipped_similar": int(bool(skipped_similar)),
+        "skipped_budget": int(bool(skipped_budget)),
         "risk_level": risk_level_from_state(pub),
         "confidence_level": confidence_level_from_state(pub),
         "first_alarm_ts": first_cell,

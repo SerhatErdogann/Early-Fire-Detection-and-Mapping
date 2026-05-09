@@ -44,6 +44,10 @@ def test_alarm_feed_row_roundtrip(tmp_path: Path):
         episode_start_ts=0.5,
     )
     assert row["schema_version"] == SCHEMA_VERSION
+    assert row["sampled_frame"] == 10
+    assert row["inferred"] == 1
+    assert row["skipped_similar"] == 0
+    assert row["skipped_budget"] == 0
     assert row["alarm_state"] == "confirmed"
     assert row["fire_detected"] is True
     assert row["risk_level"] == "high"
