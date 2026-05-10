@@ -115,12 +115,12 @@ def main():
     )
     ap.add_argument(
         "--selection_metric",
-        choices=["f1_balacc", "realistic", "recall_fpr"],
-        default="f1_balacc",
+        choices=["f1_balacc", "realistic", "recall_fpr", "protocol_balanced"],
+        default="protocol_balanced",
         help=(
             "Checkpoint seçimi: f1_balacc, realistic "
-            "(F1+bal_acc+AP−Yanlış alarm cezası), veya recall_fpr "
-            "(önce yakalama kapısı, sonra bileşik puanlar: yakalama, FPR, ayırım, kalibrasyon)."
+            "(F1+bal_acc+AP−FPR), recall_fpr (yakalama kapısı + operasyonel bileşik), "
+            "protocol_balanced (clean val/test + realistic eval bantları; stress hafif)."
         ),
     )
     ap.add_argument(

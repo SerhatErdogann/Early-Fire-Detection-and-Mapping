@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from .eval_reporting import (
     metrics_per_source,
+    protocol_balanced_selection_key,
     recall_fpr_selection_key,
     sanitize_for_json,
     select_threshold_policies,
@@ -37,7 +38,11 @@ from .metrics import (
     _best_threshold_mode,
 )
 from ..data import FlameDataset
-from ..eval.robustness_eval import realistic_noisy_test_metrics
+from ..eval.robustness_eval import (
+    REALISTIC_EVAL_BUNDLE,
+    STRESS_EVAL_BUNDLE,
+    evaluate_corruption_bundle_mean,
+)
 from .sequence_metrics import compute_sequence_alarm_summary
 from ..data.path_filter import filter_df_existing_paths
 from ..data.split import _group_split_three_way, split_train_val_extra
@@ -490,7 +495,7 @@ def train_one_run(
     inference_threshold: float | None = None,
     no_fire_weight: float = 1.0,
     fire_weight: float = 1.0,
-    selection_metric: str = "f1_balacc",
+    selection_metric: str = "protocol_balanced",
     source_weights: str | dict | None = None,
     modal_dropout_p: float = 0.0,
     thermal_init: str = "mean_rgb",
@@ -562,7 +567,7 @@ def train_one_run(
     print(f"[train] per-source labels train={_per_source_label_breakdown(tr)}")
     print(f"[train] per-source labels val={_per_source_label_breakdown(va)}")
     print(f"[train] per-source labels test={_per_source_label_breakdown(test_df)}")
-    sel_norm = str(selection_metric or "f1_balacc").lower()
+    sel_norm = str(selection_metric or "protocol_balanced").lower()
     print(f"[train] selection_metric={sel_norm} no_fire_weight={nw} fire_weight={fw} loss_mode={loss_mode}")
     if float(modal_dropout_p) > 0.0:
         print(f"[train] modal_dropout_p={float(modal_dropout_p)} (fusion-only at input level)")
@@ -849,6 +854,9 @@ def train_one_run(
     # Tracks the best validation selection score (legacy or realistic, see sel_norm).
     best_val_score = -1.0
     best_recall_fpr_key: tuple | None = None
+    best_protocol_key: tuple | None = None
+    best_proto_fallback_key: tuple | None = None
+    best_protocol_cmp: tuple | None = None
     patience_counter = 0
 
     grad_accum_steps = max(1, int(grad_accum_steps))
@@ -1197,6 +1205,72 @@ def train_one_run(
                     f"n={int(r.get('n', 0))}"
                 )
 
+        skip_protocol_eval = max_val_batches is not None and int(max_val_batches) > 0
+        val_protocol_raw: dict | None = None
+        test_realistic_raw: dict | None = None
+        test_stress_raw: dict | None = None
+        if skip_protocol_eval:
+            print("[protocol] corrupted val/test bundles skipped (max_val_batches>0)")
+        else:
+            try:
+                seeds = int(ep) * 9973 + 42
+                val_protocol_raw = evaluate_corruption_bundle_mean(
+                    model,
+                    val_loader,
+                    device,
+                    float(T),
+                    float(best_thr),
+                    mode,
+                    REALISTIC_EVAL_BUNDLE,
+                    seed=seeds,
+                    label="val_realistic",
+                )
+                test_realistic_raw = evaluate_corruption_bundle_mean(
+                    model,
+                    test_loader,
+                    device,
+                    float(T),
+                    float(best_thr),
+                    mode,
+                    REALISTIC_EVAL_BUNDLE,
+                    seed=seeds + 3,
+                    label="test_realistic",
+                )
+                test_stress_raw = evaluate_corruption_bundle_mean(
+                    model,
+                    test_loader,
+                    device,
+                    float(T),
+                    float(best_thr),
+                    mode,
+                    STRESS_EVAL_BUNDLE,
+                    seed=seeds + 7,
+                    label="test_stress",
+                )
+                if val_protocol_raw and val_protocol_raw.get("n_corruptions", 0):
+                    print(
+                        f"[val_realistic] f1={float(val_protocol_raw.get('f1', float('nan'))):.3f} "
+                        f"recall={float(val_protocol_raw.get('recall', float('nan'))):.3f} "
+                        f"fpr={float(val_protocol_raw.get('false_positive_rate', float('nan'))):.3f}"
+                    )
+                if test_realistic_raw and test_realistic_raw.get("n_corruptions", 0):
+                    print(
+                        f"[test_realistic] f1={float(test_realistic_raw.get('f1', float('nan'))):.3f} "
+                        f"recall={float(test_realistic_raw.get('recall', float('nan'))):.3f} "
+                        f"fpr={float(test_realistic_raw.get('false_positive_rate', float('nan'))):.3f}"
+                    )
+                if test_stress_raw and test_stress_raw.get("n_corruptions", 0):
+                    print(
+                        f"[test_stress] f1={float(test_stress_raw.get('f1', float('nan'))):.3f} "
+                        f"recall={float(test_stress_raw.get('recall', float('nan'))):.3f} "
+                        f"fpr={float(test_stress_raw.get('false_positive_rate', float('nan'))):.3f}"
+                    )
+            except Exception as exb:
+                print(f"[protocol] bundle eval failed: {type(exb).__name__}: {exb}")
+                val_protocol_raw = None
+                test_realistic_raw = None
+                test_stress_raw = None
+
         if extra_test_loader is not None:
             ey, ep_probs = eval_probs(model, extra_test_loader, device, temperature=T)
             pred = (ep_probs >= best_thr).astype(np.int64)
@@ -1210,6 +1284,19 @@ def train_one_run(
         else:
             sched.step()
 
+        key_pb = None
+        if sel_norm == "protocol_balanced":
+            if val_protocol_raw is not None and test_realistic_raw is not None:
+                key_pb = protocol_balanced_selection_key(
+                    vm,
+                    tm,
+                    val_protocol_raw,
+                    test_realistic_raw,
+                    test_stress_raw,
+                    val_ece=float(ece),
+                    val_brier=float(brier),
+                )
+
         score_legacy = 0.5 * float(vm.get("f1", 0.0)) + 0.5 * float(vm.get("bal_acc", 0.0))
         score_realistic = realistic_selection_score(vm)
         key_recall_fpr = (
@@ -1217,18 +1304,36 @@ def train_one_run(
             if sel_norm == "recall_fpr"
             else None
         )
+        kr_protocol_fb = recall_fpr_selection_key(vm, ece=float(ece), brier=float(brier))
+
         if sel_norm == "realistic":
             selection_score = score_realistic
         elif sel_norm == "recall_fpr" and key_recall_fpr is not None:
             selection_score = float(key_recall_fpr[1])
+        elif sel_norm == "protocol_balanced" and key_pb is not None:
+            selection_score = float(key_pb[-3])
+        elif sel_norm == "protocol_balanced" and key_pb is None:
+            print(
+                "[protocol] degraded: corrupted bundle metrics unavailable; "
+                "using recall_fpr-style composite on **clean validation**."
+            )
+            selection_score = float(kr_protocol_fb[1])
         else:
             selection_score = score_legacy
 
-        # Checkpoint selection: f1_balacc | realistic | recall_fpr (recall>=0.98 gate then operational composite)
+        # Checkpoint selection: f1_balacc | realistic | recall_fpr | protocol_balanced
+        rank_pb: tuple[float | int | tuple, ...] | None = None
         if sel_norm == "recall_fpr":
             improved = key_recall_fpr is not None and (
                 best_recall_fpr_key is None or key_recall_fpr > best_recall_fpr_key
             )
+        elif sel_norm == "protocol_balanced":
+            if key_pb is not None:
+                rank_pb = (2, float(key_pb[-3]), key_pb)
+                improved = best_protocol_cmp is None or rank_pb > best_protocol_cmp
+            else:
+                rank_pb = (1, float(kr_protocol_fb[1]), kr_protocol_fb)
+                improved = best_protocol_cmp is None or rank_pb > best_protocol_cmp
         else:
             improved = selection_score == selection_score and selection_score > best_val_score
 
@@ -1236,7 +1341,16 @@ def train_one_run(
             if sel_norm == "recall_fpr" and key_recall_fpr is not None:
                 best_recall_fpr_key = key_recall_fpr
                 best_val_score = float(key_recall_fpr[1])
-            elif sel_norm != "recall_fpr":
+            elif sel_norm == "protocol_balanced" and rank_pb is not None:
+                best_protocol_cmp = rank_pb
+                best_val_score = float(selection_score)
+                if key_pb is not None:
+                    best_protocol_key = key_pb
+                    best_proto_fallback_key = None
+                else:
+                    best_proto_fallback_key = kr_protocol_fb
+                    best_protocol_key = None
+            elif sel_norm not in ("recall_fpr", "protocol_balanced"):
                 best_val_score = float(selection_score)
             patience_counter = 0
             thr_alarm_raw = _best_threshold_mode(vy, vp, "alarm")
@@ -1342,27 +1456,9 @@ def train_one_run(
                 print(f"[eval] seq alarm skipped: {type(e).__name__}: {e}")
                 video_event_metrics = {"skipped": True, "reason": str(e)}
 
-            test_noisy_metrics: dict | None = None
-            try:
-                tnm = realistic_noisy_test_metrics(
-                    model,
-                    test_loader,
-                    device,
-                    float(T),
-                    float(best_thr),
-                    mode,
-                    severity=1,
-                    seed=42,
-                )
-                test_noisy_metrics = sanitize_for_json(tnm)
-                print(
-                    f"[test] realistic noisy (mean sev1): f1={tnm['f1']:.3f} recall={tnm['recall']:.3f} "
-                    f"fpr={tnm['false_positive_rate']:.3f} auc={tnm['auc']:.3f} "
-                    f"(n_corr={tnm.get('n_corruptions', 0)})"
-                )
-            except Exception as en:
-                print(f"[test] realistic noisy eval skipped: {type(en).__name__}: {en}")
-                test_noisy_metrics = None
+            val_real_pack = sanitize_for_json(val_protocol_raw) if val_protocol_raw else {}
+            tr_real_pack = sanitize_for_json(test_realistic_raw) if test_realistic_raw else {}
+            tstress_pack = sanitize_for_json(test_stress_raw) if test_stress_raw else {}
 
             torch.save(
                 {
@@ -1418,6 +1514,11 @@ def train_one_run(
                     "val_selection_score": float(selection_score),
                     "val_best_recall_fpr_key": (
                         list(best_recall_fpr_key) if best_recall_fpr_key is not None else None
+                    ),
+                    "val_best_protocol_balanced_key": (
+                        list(best_protocol_key)
+                        if best_protocol_key is not None
+                        else ([float(x) for x in best_proto_fallback_key] if best_proto_fallback_key is not None else None)
                     ),
                     "temperature": float(T),
                     "worst_source_by_fpr": worst_source_by_fpr,
@@ -1497,9 +1598,34 @@ def train_one_run(
                 "video_event_metrics": video_event_metrics if video_event_metrics is not None else {},
                 "worst_source_by_fpr": worst_source_by_fpr,
                 "worst_source_by_recall": worst_source_by_recall,
-                "val": {k: (float(v) if not isinstance(v, np.ndarray) else v.tolist()) for k, v in vm.items()},
-                "test": {k: (float(v) if not isinstance(v, np.ndarray) else v.tolist()) for k, v in tm.items()},
-                "test_noisy": test_noisy_metrics if test_noisy_metrics is not None else {},
+                "eval_protocol_notes": (
+                    "val_clean/test_clean: laboratory-style held-out split (threshold tuned on clean "
+                    "validation). val_realistic/test_realistic: mean over gauss_noise_rgb, "
+                    "brightness_contrast, gaussian_blur @ severity 1 (drone/camera-realistic perturbations "
+                    "at eval time only). test_stress: mean over the same trio @ severity 2 plus "
+                    "thermal_shift @ severity 1 (heavier degradation; weaker influence on checkpoint "
+                    "selection than clean/realistic blocks)."
+                ),
+                "val_clean": {
+                    k: (float(v) if not isinstance(v, np.ndarray) else v.tolist())
+                    for k, v in vm.items()
+                },
+                "val": {
+                    k: (float(v) if not isinstance(v, np.ndarray) else v.tolist())
+                    for k, v in vm.items()
+                },
+                "val_realistic": val_real_pack,
+                "test_clean": {
+                    k: (float(v) if not isinstance(v, np.ndarray) else v.tolist())
+                    for k, v in tm.items()
+                },
+                "test": {
+                    k: (float(v) if not isinstance(v, np.ndarray) else v.tolist())
+                    for k, v in tm.items()
+                },
+                "test_realistic": tr_real_pack,
+                "test_noisy": tr_real_pack,
+                "test_stress": tstress_pack,
                 **extra_info,
             }
             metrics_path = Path(OUTPUTS_DIR) / f"metrics_{mode}_{mf}.json"
@@ -1625,6 +1751,45 @@ def train_one_run(
         try:
             if mp.exists():
                 lastm = json.loads(mp.read_text(encoding="utf-8"))
+
+                def _prot_fpr_triple(src: dict | None, row_d: dict, prefix: str) -> None:
+                    if not isinstance(src, dict):
+                        return
+                    for short, sk in (
+                        ("f1", "f1"),
+                        ("recall", "recall"),
+                        ("fpr", "false_positive_rate"),
+                    ):
+                        if sk in src:
+                            v0 = src[sk]
+                            row_d[f"{prefix}_{short}"] = (
+                                float(v0) if not isinstance(v0, (list, dict)) else json.dumps(v0)
+                            )
+
+                vc = lastm.get("val_clean") if isinstance(lastm.get("val_clean"), dict) else lastm.get("val")
+                _prot_fpr_triple(vc if isinstance(vc, dict) else None, row, "val_clean")
+                _prot_fpr_triple(lastm.get("val_realistic"), row, "val_realistic")
+
+                tstc = (
+                    lastm.get("test_clean")
+                    if isinstance(lastm.get("test_clean"), dict)
+                    else lastm.get("test")
+                )
+                _prot_fpr_triple(tstc if isinstance(tstc, dict) else None, row, "test_clean")
+                tr_bundle = (
+                    lastm.get("test_realistic")
+                    if isinstance(lastm.get("test_realistic"), dict)
+                    else lastm.get("test_noisy")
+                )
+                _prot_fpr_triple(tr_bundle if isinstance(tr_bundle, dict) else None, row, "test_realistic")
+                _prot_fpr_triple(lastm.get("test_stress"), row, "test_stress")
+
+                # Back-compat alias: test_noisy_* mirrors test_realistic_* (subset).
+                for short in ("f1", "recall", "fpr"):
+                    tk = f"test_realistic_{short}"
+                    if tk in row:
+                        row[f"test_noisy_{short}"] = row[tk]
+
                 for split in ("val", "test"):
                     if isinstance(lastm.get(split), dict):
                         p = lastm[split]
@@ -1644,32 +1809,6 @@ def train_one_run(
                                 row[f"{split}_{k}"] = float(val) if not isinstance(val, (list, dict)) else json.dumps(val)
                         if "cm" in p:
                             row[f"{split}_cm"] = json.dumps(sanitize_for_json(p["cm"]))
-                if isinstance(lastm.get("test"), dict):
-                    pt = lastm["test"]
-                    for short, src in (
-                        ("f1", "f1"),
-                        ("recall", "recall"),
-                        ("fpr", "false_positive_rate"),
-                        ("auc", "auc"),
-                    ):
-                        if src in pt:
-                            v0 = pt[src]
-                            row[f"test_clean_{short}"] = (
-                                float(v0) if not isinstance(v0, (list, dict)) else json.dumps(v0)
-                            )
-                if isinstance(lastm.get("test_noisy"), dict):
-                    pn = lastm["test_noisy"]
-                    for short, src in (
-                        ("f1", "f1"),
-                        ("recall", "recall"),
-                        ("fpr", "false_positive_rate"),
-                        ("auc", "auc"),
-                    ):
-                        if src in pn:
-                            v0 = pn[src]
-                            row[f"test_noisy_{short}"] = (
-                                float(v0) if not isinstance(v0, (list, dict)) else json.dumps(v0)
-                            )
                 row["threshold_saved"] = float(lastm.get("threshold", float("nan")))
                 row["worst_source_fpr"] = lastm.get("worst_source_by_fpr")
                 row["worst_source_recall"] = lastm.get("worst_source_by_recall")
