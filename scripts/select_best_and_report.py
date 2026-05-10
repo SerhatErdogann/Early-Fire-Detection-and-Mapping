@@ -6,7 +6,7 @@ Reads ``outputs/improve_results.csv`` (typically produced on Kaggle) and writes
 
 - **best_recall_model** — maximise test recall (secondary: lower FPR, higher composite score).
 - **best_low_false_alarm_model** — lowest test FPR among runs meeting ``test_recall >= min_recall``.
-- **best_balanced_model** — highest deployment composite (:func:`operational_selection_score`-style).
+- **best_balanced_model** — highest **protocol-balanced** score when eval columns exist (clean val/test + realistic test + stress margin); otherwise deployment composite from clean test.
 
 If ``--copy_balanced_ckpt`` (default ``best_model.pt``), the balanced pick is copied.
 When the CSV is missing (local-only dev machine), exits **0** and writes a short stub Markdown.
@@ -25,7 +25,46 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.training.eval_reporting import operational_score_from_test_row
+from src.training.eval_reporting import operational_score_from_test_row, protocol_score_from_improve_row
+
+
+def _flt_cell(row: pd.Series | dict, key: str) -> float:
+    try:
+        v = row.get(key) if hasattr(row, "get") else row[key]
+        if v is None or v == "":
+            return float("nan")
+        return float(v)
+    except Exception:
+        return float("nan")
+
+
+def _protocol_metrics_table(row: pd.Series) -> str:
+    """Markdown table: F1 / recall / FPR for five eval protocol rows (+ notes)."""
+    spec = [
+        ("Clean validation (laboratory-held-out)", "val_clean"),
+        ("Realistic validation (drone/camera-style corruptions @ eval)", "val_realistic"),
+        ("Clean test", "test_clean"),
+        ("Realistic test", "test_realistic"),
+        ("Stress test (heavier corruptions; coarse margin check)", "test_stress"),
+    ]
+    lines = [
+        "| Protocol | F1 | Recall | FPR |",
+        "|---|---:|---:|---:|",
+    ]
+    for label, pfx in spec:
+        lines.append(
+            f"| {label} | {_flt_cell(row, f'{pfx}_f1'):.4f} | "
+            f"{_flt_cell(row, f'{pfx}_recall'):.4f} | {_flt_cell(row, f'{pfx}_fpr'):.4f} |"
+        )
+    lines.append("")
+    lines.append(
+        "_Interpretation: **clean** = no input corruptions (standard split). "
+        "**realistic** = mean over `gauss_noise_rgb`, `brightness_contrast`, "
+        "`gaussian_blur` at severity 1 (forward-time only; not used in training/inference). "
+        "**stress** = same trio at severity 2 plus `thermal_shift` at severity 1; "
+        "reported for engineering visibility and only weakly weighted in checkpoint picks._\n"
+    )
+    return "\n".join(lines)
 
 
 def _slug_experiment_name(name: str) -> str:
@@ -68,23 +107,20 @@ def _format_pick(title: str, row: pd.Series, *, ckpt_hint: Path | None) -> list[
         f"{_flt(row.get('test_false_positive_rate')):.4f} / {_flt(row.get('test_bal_acc')):.4f} / "
         f"{_flt(row.get('test_f1')):.4f}\n",
     ]
-    if "test_clean_f1" in row.index or "test_noisy_f1" in row.index:
-        lines.append(
-            f"- **clean test (F1 / recall / FPR / AUC)**: "
-            f"{_flt(row.get('test_clean_f1', row.get('test_f1'))):.4f} / "
-            f"{_flt(row.get('test_clean_recall', row.get('test_recall'))):.4f} / "
-            f"{_flt(row.get('test_clean_fpr', row.get('test_false_positive_rate'))):.4f} / "
-            f"{_flt(row.get('test_clean_auc', row.get('test_auc'))):.4f}\n"
-        )
-        if "test_noisy_f1" in row.index:
-            lines.append(
-                f"- **realistic noisy test** (mean of gauss_noise_rgb + brightness_contrast + "
-                f"gaussian_blur @ severity 1; **not** used for model selection): "
-                f"F1={_flt(row.get('test_noisy_f1')):.4f}, recall={_flt(row.get('test_noisy_recall')):.4f}, "
-                f"FPR={_flt(row.get('test_noisy_fpr')):.4f}, AUC={_flt(row.get('test_noisy_auc')):.4f}\n"
-            )
     lines += [
-        f"- **deployment composite (test+ECE/Brier cols)**: {operational_score_from_test_row(_row_series_to_dict(row)):.4f}\n",
+        "\n",
+        _protocol_metrics_table(row),
+        "\n",
+        f"- **deployment composite (legacy clean test + ECE/Brier)**: {operational_score_from_test_row(_row_series_to_dict(row)):.4f}\n",
+    ]
+    proto_v = None
+    try:
+        proto_v = protocol_score_from_improve_row(_row_series_to_dict(row))
+        if proto_v == proto_v:
+            lines.append(f"- **protocol-balanced score (trainer selection proxy)**: {proto_v:.4f}\n")
+    except Exception:
+        pass
+    lines += [
         f"- **checkpoint path**: `{row.get('out_ckpt', '')}`\n",
     ]
     if ckpt_hint is not None:
@@ -177,6 +213,15 @@ def main() -> int:
         return 0
 
     df["_opscore"] = df.apply(lambda r: operational_score_from_test_row(r.to_dict()), axis=1)
+    proto_ready = (
+        ("val_clean_f1" in df.columns)
+        and ("test_clean_f1" in df.columns)
+        and ("test_realistic_f1" in df.columns)
+    )
+    if proto_ready:
+        df["_bal_core"] = df.apply(lambda r: protocol_score_from_improve_row(r.to_dict()), axis=1)
+    else:
+        df["_bal_core"] = df["_opscore"]
 
     best_recall = df.sort_values(
         by=["test_recall", "test_false_positive_rate", "_opscore"],
@@ -202,7 +247,10 @@ def main() -> int:
     ).iloc[0]
 
     cand_balanced = hi.copy() if len(hi) else df.copy()
-    best_balanced = cand_balanced.sort_values(by=["_opscore", "test_recall"], ascending=[False, False]).iloc[0]
+    best_balanced = cand_balanced.sort_values(
+        by=["_bal_core", "_opscore", "test_recall"],
+        ascending=[False, False, False],
+    ).iloc[0]
 
     ck_bal = _resolve_ckpt_path(best_balanced)
     ck_recall = _resolve_ckpt_path(best_recall)
@@ -225,6 +273,13 @@ def main() -> int:
     base = df[baseline_mask].sort_values(by="test_recall", ascending=False).iloc[0] if baseline_mask.any() else df.iloc[0]
 
     lines = ["# Experiment grid — üç model seçimi\n\n"]
+    lines.append(
+        "**Değerlendirme protokolü.** _Clean validation / clean test_: laboratuvar tipi tutulmuş doğrulama ve test "
+        "(eşik bu temiz doğrulamadan seçilir). _Realistic val/test_: görülen bozulmaların tek başına güçlendirilmesi "
+        "(yalnızca metrik çıkarımında; Streamlit/canlı çıkarım yok); drone/kameraya daha yakın koşula karşılık gelir. "
+        "_Stress test_: daha ağır bozulma bandı — raporda yer alır ve checkpoint seçimini yalnızca dolaylı/çok düşük "
+        "ağırlıkla etkiler.\n\n"
+    )
     lines.append(
         "Tasarım hedefi **gerçek kullanımda güvenilir yangın uyarısı**dır (yüksek yakalama + düşük yanlış alarm + "
         "yüksek ayırıcı metrikler; mümkünse düşük ECE/Brier). Aynı satır her üç başlıkta da kazanmak zorunda değildir.\n\n"

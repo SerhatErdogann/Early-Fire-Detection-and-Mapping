@@ -117,32 +117,39 @@ def _metrics_flat_for_improve_csv(
                     )
             if "cm" in p:
                 row[f"{split}_cm"] = json.dumps(sanitize_for_json(p["cm"]))
-    if isinstance(lastm.get("test"), dict):
-        pt = lastm["test"]
-        for short, src in (
+
+    def _prot_flat(src: dict | None, prefix: str) -> None:
+        if not isinstance(src, dict):
+            return
+        for short, sk in (
             ("f1", "f1"),
             ("recall", "recall"),
             ("fpr", "false_positive_rate"),
             ("auc", "auc"),
         ):
-            if src in pt:
-                v0 = pt[src]
-                row[f"test_clean_{short}"] = (
+            if sk in src:
+                v0 = src[sk]
+                row[f"{prefix}_{short}"] = (
                     float(v0) if not isinstance(v0, (list, dict)) else json.dumps(v0)
                 )
-    if isinstance(lastm.get("test_noisy"), dict):
-        pn = lastm["test_noisy"]
-        for short, src in (
-            ("f1", "f1"),
-            ("recall", "recall"),
-            ("fpr", "false_positive_rate"),
-            ("auc", "auc"),
-        ):
-            if src in pn:
-                v0 = pn[src]
-                row[f"test_noisy_{short}"] = (
-                    float(v0) if not isinstance(v0, (list, dict)) else json.dumps(v0)
-                )
+
+    vc = lastm.get("val_clean") if isinstance(lastm.get("val_clean"), dict) else lastm.get("val")
+    _prot_flat(vc if isinstance(vc, dict) else None, "val_clean")
+    _prot_flat(lastm.get("val_realistic"), "val_realistic")
+    tc = lastm.get("test_clean") if isinstance(lastm.get("test_clean"), dict) else lastm.get("test")
+    _prot_flat(tc if isinstance(tc, dict) else None, "test_clean")
+    trb = (
+        lastm.get("test_realistic")
+        if isinstance(lastm.get("test_realistic"), dict)
+        else lastm.get("test_noisy")
+    )
+    _prot_flat(trb if isinstance(trb, dict) else None, "test_realistic")
+    _prot_flat(lastm.get("test_stress"), "test_stress")
+    for short in ("f1", "recall", "fpr", "auc"):
+        k = f"test_realistic_{short}"
+        if k in row:
+            row[f"test_noisy_{short}"] = row[k]
+
     row["threshold_saved"] = float(lastm.get("threshold", float("nan")))
     ws = lastm.get("worst_source_by_fpr")
     row["worst_source_fpr"] = json.dumps(ws) if isinstance(ws, (dict, list)) else ws

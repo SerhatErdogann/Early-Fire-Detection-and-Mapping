@@ -83,7 +83,7 @@ python scripts/run_priority_experiment_suite.py --dry_run \
 | Bayrak | Açıklama |
 |--------|-----------|
 | `--model_family` | `early_fusion`, `dual_branch_fusion`, `dual_branch_gated_fusion`, `dual_branch_attention_fusion`, `dual_branch_mid_fusion` |
-| `--selection_metric` | `f1_balacc`, `realistic`, `recall_fpr` (val recall≥0.98 kapısından sonra operasyonel bileşik: yakalama, F1, bal_acc, −FPR, −ECE, −Brier) |
+| `--selection_metric` | `protocol_balanced` (varsayılan; clean val/test + realistic eval bantları; stress hafif), `f1_balacc`, `realistic`, `recall_fpr` |
 | `--thermal_norm` | `percentile`, `minmax`, `uint16_div`, `train_zscore` |
 | `--modal_dropout_p` | Füzyon modalite dropout olasılığı |
 | `--thermal_lr_mult`, `--freeze_rgb_epochs` | Dual-branch ısıtma politikası |
@@ -130,7 +130,7 @@ Kaggle’da yolları `/kaggle/working/outputs/...` ve `/kaggle/working/models/..
 - **Bölme & sızıntı:** `split_group`; `flame_video_nofire` pair politikası README’deki özetle uyumlu. İndeks değişiminden sonra `scripts/check_leakage.py`.
 - **Source-aware eşik:** Trainer val/test için kaynak bazlı eşik taraması ve JSON/checkpoint içi meta.
 - **Augmentation:** Yalnızca **train** loader’da (RGB jitter/blur/erase; termal fotoğrafik + random patch). **Train’de** termal tensöre **Gaussian additive noise uygulanmaz** (temiz öğrenme yüzeyi). RGB dalı için `--rgb_aug_intensity` varsayılanı **1.15** (hafif güçlendirilmiş RGB invariance; checkpoint’teki fusion/thermal ayarları ve modal dropout aynı şekilde korunur).
-- **Gaussian gürültü — sadece offline test:** `robustness_eval.py` ve eğitim sonunda `metrics_*.json` / `improve_results.csv` içinde **clean test** yanında **realistic noisy test** (RGB Gaussian + parlaklık/kontrast kayması + Gauss blur, hepsi **severity 1**, ortalama) raporlanır. **`robustness_eval` CLI artık varsayılan olarak yalnızca severity 1** ile koşar; tam `1,2,3` grid’i `--severities 1,2,3` ile alırsınız (stres / debug). `ablation_eval` içindeki sabit σ `*_gauss_noise` koşulları val/test forward sırasında eklenir; trainer DataLoader’ına karışmaz.
+- **Eval protokolü (yalnızca metrik çıkarımında):** metrics / `improve_results` artık **val_clean**, **val_realistic** (gauss_noise_rgb + parlaklık-kontrast + Gauss blur @ sev1 ortalaması), **test_clean**, **test_realistic** (aynı sev1), **test_stress** (aynı üçlü @ sev2 + `thermal_shift` @ sev1 ortalaması) içerir; eğitim ve canlı inference’a uygulanmaz. Eski alanlar uyumluluk için: `val`=val_clean, `test`=test_clean, `test_noisy`=test_realistic. **Gaussian gürültü — sadece offline test:** `robustness_eval.py` varsayılan **`--severities 1`** (stres için `1,2,3`). `ablation_eval` sabit σ koşulları yalnızca forward’da.
 
 ## Robustness CLI (offline)
 
