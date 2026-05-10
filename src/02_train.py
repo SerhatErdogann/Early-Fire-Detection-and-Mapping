@@ -173,8 +173,8 @@ def main():
     ap.add_argument(
         "--rgb_aug_intensity",
         type=float,
-        default=1.0,
-        help="Scale train-time RGB photometric jitter / blur / erase (1.0 = default strength).",
+        default=1.15,
+        help="Scale train-time RGB photometric jitter / blur / erase (1.0 = legacy baseline; default 1.15 for slightly stronger RGB invariance).",
     )
     ap.add_argument(
         "--thermal_aug_intensity",

@@ -37,6 +37,7 @@ from .metrics import (
     _best_threshold_mode,
 )
 from ..data import FlameDataset
+from ..eval.robustness_eval import realistic_noisy_test_metrics
 from .sequence_metrics import compute_sequence_alarm_summary
 from ..data.path_filter import filter_df_existing_paths
 from ..data.split import _group_split_three_way, split_train_val_extra
@@ -503,7 +504,7 @@ def train_one_run(
     gate_min_thermal_floor: float = 0.0,
     gate_min_thermal_weight: float = 0.0,
     gate_balance_weight: float = 0.0,
-    rgb_aug_intensity: float = 1.0,
+    rgb_aug_intensity: float = 1.15,
     thermal_aug_intensity: float = 1.0,
 ):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1341,6 +1342,28 @@ def train_one_run(
                 print(f"[eval] seq alarm skipped: {type(e).__name__}: {e}")
                 video_event_metrics = {"skipped": True, "reason": str(e)}
 
+            test_noisy_metrics: dict | None = None
+            try:
+                tnm = realistic_noisy_test_metrics(
+                    model,
+                    test_loader,
+                    device,
+                    float(T),
+                    float(best_thr),
+                    mode,
+                    severity=1,
+                    seed=42,
+                )
+                test_noisy_metrics = sanitize_for_json(tnm)
+                print(
+                    f"[test] realistic noisy (mean sev1): f1={tnm['f1']:.3f} recall={tnm['recall']:.3f} "
+                    f"fpr={tnm['false_positive_rate']:.3f} auc={tnm['auc']:.3f} "
+                    f"(n_corr={tnm.get('n_corruptions', 0)})"
+                )
+            except Exception as en:
+                print(f"[test] realistic noisy eval skipped: {type(en).__name__}: {en}")
+                test_noisy_metrics = None
+
             torch.save(
                 {
                     "mode": mode,
@@ -1476,6 +1499,7 @@ def train_one_run(
                 "worst_source_by_recall": worst_source_by_recall,
                 "val": {k: (float(v) if not isinstance(v, np.ndarray) else v.tolist()) for k, v in vm.items()},
                 "test": {k: (float(v) if not isinstance(v, np.ndarray) else v.tolist()) for k, v in tm.items()},
+                "test_noisy": test_noisy_metrics if test_noisy_metrics is not None else {},
                 **extra_info,
             }
             metrics_path = Path(OUTPUTS_DIR) / f"metrics_{mode}_{mf}.json"
@@ -1620,6 +1644,32 @@ def train_one_run(
                                 row[f"{split}_{k}"] = float(val) if not isinstance(val, (list, dict)) else json.dumps(val)
                         if "cm" in p:
                             row[f"{split}_cm"] = json.dumps(sanitize_for_json(p["cm"]))
+                if isinstance(lastm.get("test"), dict):
+                    pt = lastm["test"]
+                    for short, src in (
+                        ("f1", "f1"),
+                        ("recall", "recall"),
+                        ("fpr", "false_positive_rate"),
+                        ("auc", "auc"),
+                    ):
+                        if src in pt:
+                            v0 = pt[src]
+                            row[f"test_clean_{short}"] = (
+                                float(v0) if not isinstance(v0, (list, dict)) else json.dumps(v0)
+                            )
+                if isinstance(lastm.get("test_noisy"), dict):
+                    pn = lastm["test_noisy"]
+                    for short, src in (
+                        ("f1", "f1"),
+                        ("recall", "recall"),
+                        ("fpr", "false_positive_rate"),
+                        ("auc", "auc"),
+                    ):
+                        if src in pn:
+                            v0 = pn[src]
+                            row[f"test_noisy_{short}"] = (
+                                float(v0) if not isinstance(v0, (list, dict)) else json.dumps(v0)
+                            )
                 row["threshold_saved"] = float(lastm.get("threshold", float("nan")))
                 row["worst_source_fpr"] = lastm.get("worst_source_by_fpr")
                 row["worst_source_recall"] = lastm.get("worst_source_by_recall")
