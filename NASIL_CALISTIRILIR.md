@@ -136,9 +136,10 @@ python -m src.eval.robustness_eval `
   --csv data/master_index.parquet `
   --split test `
   --corruptions all `
-  --severities 1,2,3 `
   --out outputs/robustness_eval.csv
 ```
+
+Varsayılan `--severities` değeri **1**’dir (ana raporlama ile uyumlu). Tam stres grid’i için `--severities 1,2,3` ekleyin.
 
 Çıktı: `outputs/robustness_eval.csv` — her (corruption, severity) için `n, acc, bal_acc, precision, recall, F1, specificity, FPR, AUC, AP`.
 "clean" satırı standart val/test ölçümüne eşittir, kontrol noktası olarak kullanılır.

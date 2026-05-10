@@ -310,6 +310,11 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-skip-done", action="store_true")
     ap.add_argument("--no-eval", action="store_true", help="Skip robustness/ablation after each train.")
+    ap.add_argument(
+        "--robustness-stress",
+        action="store_true",
+        help="After the default sev-1 sweep, also run outputs/robustness_stress_eval.csv with --severities 1,2,3 (debug).",
+    )
     ap.add_argument("--no-select-best", action="store_true")
     ap.add_argument("--only", default="", help="Regex; only experiments whose name matches.")
     ap.add_argument("--list", action="store_true", help="Print experiment grid and exit.")
@@ -450,6 +455,7 @@ def main() -> int:
             slug = _slug_experiment_name(ename)
             rob_out = archive_dir / f"robustness__{slug}.csv"
             ab_out = archive_dir / f"ablation__{slug}.csv"
+            stress_out: Path | None = None
 
             rob_cmd = [
                 py,
@@ -461,6 +467,8 @@ def main() -> int:
                 csv_arg,
                 "--split",
                 "test",
+                "--severities",
+                "1",
                 "--out",
                 str(rob_out),
             ]
@@ -493,6 +501,38 @@ def main() -> int:
                     },
                 )
 
+            if rob_rc == 0 and args.robustness_stress:
+                stress_out = archive_dir / f"robustness_stress__{slug}.csv"
+                stress_cmd = [
+                    py,
+                    "-m",
+                    "src.eval.robustness_eval",
+                    "--ckpt",
+                    str(ckpt_canon),
+                    "--csv",
+                    csv_arg,
+                    "--split",
+                    "test",
+                    "--severities",
+                    "1,2,3",
+                    "--out",
+                    str(stress_out),
+                ]
+                print("+", " ".join(stress_cmd), flush=True)
+                str_rc, str_blob = _run_capture(stress_cmd, cwd=code_root, env=env_base)
+                if str_rc != 0:
+                    _append_fail_row(
+                        logs_dir,
+                        {
+                            "ts_utc": datetime.now(timezone.utc).isoformat(),
+                            "experiment_name": ename,
+                            "stage": "robustness_stress_eval",
+                            "exit_code": str(str_rc),
+                            "message": str_blob[:1800],
+                            "command": json.dumps(stress_cmd, ensure_ascii=False),
+                        },
+                    )
+
             print("+", " ".join(ab_cmd), flush=True)
             ab_rc, ab_blob = _run_capture(ab_cmd, cwd=code_root, env=env_base)
             ab_rc_s = str(ab_rc)
@@ -512,6 +552,8 @@ def main() -> int:
             try:
                 if rob_out.is_file():
                     shutil.copy2(rob_out, outs / "robustness_eval.csv")
+                if stress_out is not None and stress_out.is_file():
+                    shutil.copy2(stress_out, outs / "robustness_stress_eval.csv")
                 if ab_out.is_file():
                     shutil.copy2(ab_out, outs / "ablation_suite.csv")
             except Exception as exc:

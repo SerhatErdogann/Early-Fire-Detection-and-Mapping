@@ -129,8 +129,8 @@ Kaggle’da yolları `/kaggle/working/outputs/...` ve `/kaggle/working/models/..
 - **Sınıf dengesi:** `--loss_mode balanced_sampler` + `WeightedRandomSampler`; `cb_focal` vb.
 - **Bölme & sızıntı:** `split_group`; `flame_video_nofire` pair politikası README’deki özetle uyumlu. İndeks değişiminden sonra `scripts/check_leakage.py`.
 - **Source-aware eşik:** Trainer val/test için kaynak bazlı eşik taraması ve JSON/checkpoint içi meta.
-- **Augmentation:** Yalnızca **train** loader’da (RGB jitter/blur/erase; termal fotoğrafik + random patch). **Train’de** termal tensöre **Gaussian additive noise uygulanmaz** (temiz öğrenme yüzeyi).
-- **Gaussian gürültü — sadece offline test:** `robustness_eval.py` (RGB/thermal Gaussian sweep) ve `ablation_eval.py` içindeki `*_gauss_noise` koşulları **val/test verisine forward sırasında** eklenir; trainer DataLoader’ına karışmaz.
+- **Augmentation:** Yalnızca **train** loader’da (RGB jitter/blur/erase; termal fotoğrafik + random patch). **Train’de** termal tensöre **Gaussian additive noise uygulanmaz** (temiz öğrenme yüzeyi). RGB dalı için `--rgb_aug_intensity` varsayılanı **1.15** (hafif güçlendirilmiş RGB invariance; checkpoint’teki fusion/thermal ayarları ve modal dropout aynı şekilde korunur).
+- **Gaussian gürültü — sadece offline test:** `robustness_eval.py` ve eğitim sonunda `metrics_*.json` / `improve_results.csv` içinde **clean test** yanında **realistic noisy test** (RGB Gaussian + parlaklık/kontrast kayması + Gauss blur, hepsi **severity 1**, ortalama) raporlanır. **`robustness_eval` CLI artık varsayılan olarak yalnızca severity 1** ile koşar; tam `1,2,3` grid’i `--severities 1,2,3` ile alırsınız (stres / debug). `ablation_eval` içindeki sabit σ `*_gauss_noise` koşulları val/test forward sırasında eklenir; trainer DataLoader’ına karışmaz.
 
 ## Robustness CLI (offline)
 

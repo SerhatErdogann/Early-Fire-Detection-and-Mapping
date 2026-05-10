@@ -67,6 +67,23 @@ def _format_pick(title: str, row: pd.Series, *, ckpt_hint: Path | None) -> list[
         f"- **test recall / FPR / bal_acc / F1**: {_flt(row.get('test_recall')):.4f} / "
         f"{_flt(row.get('test_false_positive_rate')):.4f} / {_flt(row.get('test_bal_acc')):.4f} / "
         f"{_flt(row.get('test_f1')):.4f}\n",
+    ]
+    if "test_clean_f1" in row.index or "test_noisy_f1" in row.index:
+        lines.append(
+            f"- **clean test (F1 / recall / FPR / AUC)**: "
+            f"{_flt(row.get('test_clean_f1', row.get('test_f1'))):.4f} / "
+            f"{_flt(row.get('test_clean_recall', row.get('test_recall'))):.4f} / "
+            f"{_flt(row.get('test_clean_fpr', row.get('test_false_positive_rate'))):.4f} / "
+            f"{_flt(row.get('test_clean_auc', row.get('test_auc'))):.4f}\n"
+        )
+        if "test_noisy_f1" in row.index:
+            lines.append(
+                f"- **realistic noisy test** (mean of gauss_noise_rgb + brightness_contrast + "
+                f"gaussian_blur @ severity 1; **not** used for model selection): "
+                f"F1={_flt(row.get('test_noisy_f1')):.4f}, recall={_flt(row.get('test_noisy_recall')):.4f}, "
+                f"FPR={_flt(row.get('test_noisy_fpr')):.4f}, AUC={_flt(row.get('test_noisy_auc')):.4f}\n"
+            )
+    lines += [
         f"- **deployment composite (test+ECE/Brier cols)**: {operational_score_from_test_row(_row_series_to_dict(row)):.4f}\n",
         f"- **checkpoint path**: `{row.get('out_ckpt', '')}`\n",
     ]

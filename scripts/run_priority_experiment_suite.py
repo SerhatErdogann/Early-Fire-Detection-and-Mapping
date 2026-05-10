@@ -35,30 +35,34 @@ def run_cmd(cmd: list[str], cwd: Path) -> int:
 
 
 def detect_modality_collapse(csv_path: Path) -> tuple[bool, str]:
+    """Heuristic stress-test diagnostic using the strongest available severity rows."""
     df = pd.read_csv(csv_path) if csv_path.exists() else pd.DataFrame()
     if df.empty:
         return False, "no_robustness_csv"
     try:
-        clean = df[(df["corruption"] == "clean")]["recall"].iloc[0]
-        r_rgb3 = df[(df["corruption"] == "gauss_noise_rgb") & (df["severity"] == 3)][
-            "recall"
-        ].iloc[0]
-        rt3 = df[(df["corruption"] == "gauss_noise_thermal") & (df["severity"] == 3)][
-            "recall"
-        ].iloc[0]
+        clean = float(df[(df["corruption"] == "clean")]["recall"].iloc[0])
+        rgb_sub = df[df["corruption"] == "gauss_noise_rgb"]
+        th_sub = df[df["corruption"] == "gauss_noise_thermal"]
+        if len(rgb_sub) == 0 or len(th_sub) == 0:
+            return False, "missing_noise_rows"
+        sev_rgb = int(rgb_sub["severity"].max()) if "severity" in rgb_sub.columns else 3
+        sev_th = int(th_sub["severity"].max()) if "severity" in th_sub.columns else 3
+        r_rgb = float(rgb_sub[rgb_sub["severity"] == sev_rgb]["recall"].iloc[0])
+        rt = float(th_sub[th_sub["severity"] == sev_th]["recall"].iloc[0])
     except Exception:
         return False, "parse_error"
-    collapse = (float(r_rgb3) < 0.05) and (float(rt3) > float(clean) * 0.85)
+    collapse = (float(r_rgb) < 0.05) and (float(rt) > float(clean) * 0.85)
     reason = ""
     if collapse:
         reason = (
-            "RGB gauss_noise sev3 recall ~0 while thermal noise keeps clean-like recall "
-            "(model likely RGB-dominated modality collapse)."
+            "RGB gauss_noise (max sev in CSV) recall ~0 while thermal noise keeps clean-like recall "
+            "(model likely RGB-dominated modality collapse). Re-run robustness with "
+            "`--severities 1,2,3` for the full stress grid."
         )
     else:
         reason = (
-            "No RGB-collapse signature (severity-3 RGB noise did not wipe recall "
-            "with thermal unaffected)."
+            "No RGB-collapse signature on the strongest available RGB vs thermal noise rows. "
+            "Pass `--severities 1,2,3` for a deeper stress sweep."
         )
     return collapse, reason
 
@@ -113,6 +117,32 @@ def _metrics_flat_for_improve_csv(
                     )
             if "cm" in p:
                 row[f"{split}_cm"] = json.dumps(sanitize_for_json(p["cm"]))
+    if isinstance(lastm.get("test"), dict):
+        pt = lastm["test"]
+        for short, src in (
+            ("f1", "f1"),
+            ("recall", "recall"),
+            ("fpr", "false_positive_rate"),
+            ("auc", "auc"),
+        ):
+            if src in pt:
+                v0 = pt[src]
+                row[f"test_clean_{short}"] = (
+                    float(v0) if not isinstance(v0, (list, dict)) else json.dumps(v0)
+                )
+    if isinstance(lastm.get("test_noisy"), dict):
+        pn = lastm["test_noisy"]
+        for short, src in (
+            ("f1", "f1"),
+            ("recall", "recall"),
+            ("fpr", "false_positive_rate"),
+            ("auc", "auc"),
+        ):
+            if src in pn:
+                v0 = pn[src]
+                row[f"test_noisy_{short}"] = (
+                    float(v0) if not isinstance(v0, (list, dict)) else json.dumps(v0)
+                )
     row["threshold_saved"] = float(lastm.get("threshold", float("nan")))
     ws = lastm.get("worst_source_by_fpr")
     row["worst_source_fpr"] = json.dumps(ws) if isinstance(ws, (dict, list)) else ws
@@ -415,6 +445,8 @@ def main() -> int:
                 csv_path,
                 "--split",
                 "test",
+                "--severities",
+                "1",
                 "--out",
                 str(PROJECT_ROOT / "outputs/robustness_eval.csv"),
             ],
