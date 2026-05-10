@@ -18,8 +18,11 @@ Usage example:
         --csv data/master_index.parquet \\
         --split test \\
         --corruptions all \\
-        --severities 1,2,3 \\
+        --severities 1 \\
         --out outputs/robustness_eval.csv
+
+Pass ``--severities 1,2,3`` for the full stress grid (higher severities are no longer the
+headline metric in training reports; they remain useful for debugging).
 
 For checkpoints trained with ``--thermal_norm train_zscore``, ``thermal_mu`` and
 ``thermal_sigma`` are read from the checkpoint and/or ``outputs/metrics_*.json``.
@@ -36,7 +39,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 import numpy as np
 import pandas as pd
@@ -145,6 +148,15 @@ CORRUPTIONS: dict[str, CorruptionFn] = {
     "thermal_shift": _thermal_shift,
 }
 
+# Realistic sensor / drone-style corruptions aggregated next to clean test metrics.
+# ``run_robustness`` defaults to severity **1** only for the sweep CSV; pass
+# ``--severities 1,2,3`` for the older multi-severity stress grid.
+REALISTIC_NOISY_SUITE: tuple[str, ...] = (
+    "gauss_noise_rgb",
+    "brightness_contrast",
+    "gaussian_blur",
+)
+
 
 def _resolve_corruptions(spec: str, mode: str) -> list[str]:
     """Expand the CLI ``--corruptions`` flag into a concrete list of names."""
@@ -164,6 +176,13 @@ def _resolve_corruptions(spec: str, mode: str) -> list[str]:
     elif mode == "thermal":
         names = [n for n in names if n not in ("gauss_noise_rgb", "brightness_contrast")]
     return names
+
+
+def realistic_noisy_corruption_names(mode: str) -> list[str]:
+    """Corruptions from :data:`REALISTIC_NOISY_SUITE` that apply to ``mode`` (rgb/thermal/fusion)."""
+    want = set(REALISTIC_NOISY_SUITE)
+    resolved = _resolve_corruptions(",".join(REALISTIC_NOISY_SUITE), str(mode).lower())
+    return [n for n in resolved if n in want]
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +294,69 @@ def _row_for(ys: np.ndarray, probs: np.ndarray, threshold: float, name: str, sev
     }
 
 
+@torch.inference_mode()
+def realistic_noisy_test_metrics(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: str,
+    temperature: float,
+    threshold: float,
+    mode: str,
+    *,
+    severity: int = 1,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Mean F1 / recall / FPR / AUC over :data:`REALISTIC_NOISY_SUITE` (mode-filtered) at one severity.
+
+    Used by the training pipeline on **test** split only; validation stays clean and the
+    training DataLoader never receives these corruptions.
+    """
+    torch.manual_seed(int(seed))
+    np.random.seed(int(seed))
+    mode_l = str(mode).lower()
+    names = realistic_noisy_corruption_names(mode_l)
+    if not names:
+        return {
+            "f1": float("nan"),
+            "recall": float("nan"),
+            "false_positive_rate": float("nan"),
+            "auc": float("nan"),
+            "n_corruptions": 0,
+            "components": [],
+            "note": "no applicable realistic-noisy corruptions for this mode",
+        }
+    components: list[dict[str, Any]] = []
+    sev = int(severity)
+    for name in names:
+        fn = CORRUPTIONS[name]
+        ys, probs = _eval_loader(model, loader, device, float(temperature), fn, sev)
+        m = metrics_at_threshold(ys, probs, float(threshold))
+        components.append(
+            {
+                "corruption": name,
+                "severity": sev,
+                "f1": float(m.get("f1", float("nan"))),
+                "recall": float(m.get("recall", float("nan"))),
+                "false_positive_rate": float(m.get("false_positive_rate", float("nan"))),
+                "auc": float(m.get("auc", float("nan"))),
+            }
+        )
+
+    def _nanmean(key: str) -> float:
+        vals = np.asarray([c[key] for c in components], dtype=np.float64)
+        return float(np.nanmean(vals))
+
+    return {
+        "f1": _nanmean("f1"),
+        "recall": _nanmean("recall"),
+        "false_positive_rate": _nanmean("false_positive_rate"),
+        "auc": _nanmean("auc"),
+        "n_corruptions": len(components),
+        "components": components,
+        "note": f"mean over {names} @ severity={sev} (mode={mode_l})",
+    }
+
+
 def _parse_severities(spec: str) -> list[int]:
     out: list[int] = []
     for tok in str(spec or "").split(","):
@@ -300,7 +382,7 @@ def run_robustness(
     csv_path: str,
     split: str = "test",
     corruptions: Iterable[str] | str = "all",
-    severities: Iterable[int] | str = (1, 2, 3),
+    severities: Iterable[int] | str = (1,),
     out_csv: str | None = "outputs/robustness_eval.csv",
     bs: int = 16,
     num_workers: int = 0,
@@ -443,8 +525,9 @@ def main() -> int:
     )
     ap.add_argument(
         "--severities",
-        default="1,2,3",
-        help="Comma-separated severity levels (1=mild, 2=medium, 3=strong).",
+        default="1",
+        help="Comma-separated severity levels (1=mild, 2=medium, 3=strong). Default `1` for the "
+        "main realistic sweep; use `1,2,3` for the older stress grid.",
     )
     ap.add_argument("--out", default="outputs/robustness_eval.csv", help="Output CSV path.")
     ap.add_argument("--bs", type=int, default=16)
