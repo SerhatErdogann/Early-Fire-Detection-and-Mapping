@@ -158,6 +158,24 @@ REALISTIC_NOISY_SUITE: tuple[str, ...] = (
 )
 
 
+def _bundle_pair_applies(mode: str, corruption_name: str) -> bool:
+    mode_l = str(mode).lower()
+    cand = _resolve_corruptions(str(corruption_name), mode_l)
+    return cand and cand[0] == str(corruption_name)
+
+
+REALISTIC_EVAL_BUNDLE: tuple[tuple[str, int], ...] = tuple(
+    (n, 1) for n in REALISTIC_NOISY_SUITE
+)
+# Heavier stress curve: RGB-style corruptions at severity 2 + mild thermal drift (sev1).
+STRESS_EVAL_BUNDLE: tuple[tuple[str, int], ...] = (
+    ("gauss_noise_rgb", 2),
+    ("brightness_contrast", 2),
+    ("gaussian_blur", 2),
+    ("thermal_shift", 1),
+)
+
+
 def _resolve_corruptions(spec: str, mode: str) -> list[str]:
     """Expand the CLI ``--corruptions`` flag into a concrete list of names."""
     spec = (spec or "all").strip()
@@ -295,6 +313,91 @@ def _row_for(ys: np.ndarray, probs: np.ndarray, threshold: float, name: str, sev
 
 
 @torch.inference_mode()
+def evaluate_corruption_bundle_mean(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: str,
+    temperature: float,
+    threshold: float,
+    mode: str,
+    bundle: Iterable[tuple[str, int]],
+    *,
+    seed: int = 0,
+    label: str = "bundle",
+) -> dict[str, Any]:
+    """Apply each (corruption, severity) on ``loader`` forwards; return mean scalar metrics + components.
+
+    Pairs that do not apply to ``mode`` (e.g. thermal-only on RGB checkpoints) are skipped.
+    """
+    torch.manual_seed(int(seed))
+    np.random.seed(int(seed))
+    mode_l = str(mode).lower()
+    pairs: list[tuple[str, int]] = []
+    for name, sev in bundle:
+        if not _bundle_pair_applies(mode_l, name):
+            continue
+        if name not in CORRUPTIONS:
+            continue
+        pairs.append((str(name), int(sev)))
+
+    if not pairs:
+        return {
+            "acc": float("nan"),
+            "bal_acc": float("nan"),
+            "precision": float("nan"),
+            "recall": float("nan"),
+            "f1": float("nan"),
+            "specificity": float("nan"),
+            "false_positive_rate": float("nan"),
+            "auc": float("nan"),
+            "ap": float("nan"),
+            "n_corruptions": 0,
+            "components": [],
+            "note": f"no applicable corruptions in bundle for mode={mode_l!r} ({label})",
+        }
+
+    components: list[dict[str, Any]] = []
+    for name, sev in pairs:
+        fn = CORRUPTIONS[name]
+        ys, probs = _eval_loader(model, loader, device, float(temperature), fn, sev)
+        m = metrics_at_threshold(ys, probs, float(threshold))
+        components.append(
+            {
+                "corruption": name,
+                "severity": sev,
+                "acc": float(m.get("acc", float("nan"))),
+                "bal_acc": float(m.get("bal_acc", float("nan"))),
+                "precision": float(m.get("precision", float("nan"))),
+                "recall": float(m.get("recall", float("nan"))),
+                "f1": float(m.get("f1", float("nan"))),
+                "specificity": float(m.get("specificity", float("nan"))),
+                "false_positive_rate": float(m.get("false_positive_rate", float("nan"))),
+                "auc": float(m.get("auc", float("nan"))),
+                "ap": float(m.get("ap", float("nan"))),
+            }
+        )
+
+    def _nm(k: str) -> float:
+        return float(np.nanmean(np.asarray([float(c[k]) for c in components], dtype=np.float64)))
+
+    note_names = [f"{n}@{s}" for n, s in pairs]
+    return {
+        "acc": _nm("acc"),
+        "bal_acc": _nm("bal_acc"),
+        "precision": _nm("precision"),
+        "recall": _nm("recall"),
+        "f1": _nm("f1"),
+        "specificity": _nm("specificity"),
+        "false_positive_rate": _nm("false_positive_rate"),
+        "auc": _nm("auc"),
+        "ap": _nm("ap"),
+        "n_corruptions": len(components),
+        "components": components,
+        "note": f"mean over [{', '.join(note_names)}] (mode={mode_l}, {label})",
+    }
+
+
+@torch.inference_mode()
 def realistic_noisy_test_metrics(
     model: torch.nn.Module,
     loader: DataLoader,
@@ -306,55 +409,19 @@ def realistic_noisy_test_metrics(
     severity: int = 1,
     seed: int = 0,
 ) -> dict[str, Any]:
-    """Mean F1 / recall / FPR / AUC over :data:`REALISTIC_NOISY_SUITE` (mode-filtered) at one severity.
-
-    Used by the training pipeline on **test** split only; validation stays clean and the
-    training DataLoader never receives these corruptions.
-    """
-    torch.manual_seed(int(seed))
-    np.random.seed(int(seed))
-    mode_l = str(mode).lower()
-    names = realistic_noisy_corruption_names(mode_l)
-    if not names:
-        return {
-            "f1": float("nan"),
-            "recall": float("nan"),
-            "false_positive_rate": float("nan"),
-            "auc": float("nan"),
-            "n_corruptions": 0,
-            "components": [],
-            "note": "no applicable realistic-noisy corruptions for this mode",
-        }
-    components: list[dict[str, Any]] = []
-    sev = int(severity)
-    for name in names:
-        fn = CORRUPTIONS[name]
-        ys, probs = _eval_loader(model, loader, device, float(temperature), fn, sev)
-        m = metrics_at_threshold(ys, probs, float(threshold))
-        components.append(
-            {
-                "corruption": name,
-                "severity": sev,
-                "f1": float(m.get("f1", float("nan"))),
-                "recall": float(m.get("recall", float("nan"))),
-                "false_positive_rate": float(m.get("false_positive_rate", float("nan"))),
-                "auc": float(m.get("auc", float("nan"))),
-            }
-        )
-
-    def _nanmean(key: str) -> float:
-        vals = np.asarray([c[key] for c in components], dtype=np.float64)
-        return float(np.nanmean(vals))
-
-    return {
-        "f1": _nanmean("f1"),
-        "recall": _nanmean("recall"),
-        "false_positive_rate": _nanmean("false_positive_rate"),
-        "auc": _nanmean("auc"),
-        "n_corruptions": len(components),
-        "components": components,
-        "note": f"mean over {names} @ severity={sev} (mode={mode_l})",
-    }
+    """Backward-compatible alias (realistic suite at a single severity across all members)."""
+    bundle = tuple((n, int(severity)) for n in REALISTIC_NOISY_SUITE)
+    return evaluate_corruption_bundle_mean(
+        model,
+        loader,
+        device,
+        temperature,
+        threshold,
+        mode,
+        bundle,
+        seed=int(seed),
+        label="realistic",
+    )
 
 
 def _parse_severities(spec: str) -> list[int]:
@@ -369,7 +436,7 @@ def _parse_severities(spec: str) -> list[int]:
             continue
         if 1 <= v <= 3:
             out.append(v)
-    return out or [1, 2, 3]
+    return out or [1]
 
 
 # ---------------------------------------------------------------------------

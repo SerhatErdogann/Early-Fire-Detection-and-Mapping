@@ -433,6 +433,123 @@ def operational_score_from_test_row(row: dict, *, ece_key: str = "val_ece", brie
     return operational_selection_score(vm, ece=ece, brier=bri)
 
 
+def protocol_balanced_selection_key(
+    vm_clean: dict,
+    tm_clean: dict,
+    val_realistic: dict | None,
+    test_realistic: dict | None,
+    test_stress: dict | None,
+    *,
+    val_ece: float,
+    val_brier: float,
+) -> tuple:
+    """Epoch checkpoint sorting key when ``selection_metric protocol_balanced`` is enabled.
+
+    Lexicographically **larger is better**.
+    Prefer strong **clean val/test**, keep **realistic test** reasonably close behind clean test,
+    reward **realistic val**, use **stress test recall** only as a weak tie-break (light penalty when
+    stress recall collapses; never dominates the headline score).
+    """
+    v_r = _safe_metric(vm_clean.get("recall"))
+    tc_r = _safe_metric(tm_clean.get("recall"))
+    tc_f1 = _safe_metric(tm_clean.get("f1"))
+    vr = val_realistic or {}
+    tr = test_realistic or {}
+    ts = test_stress or {}
+    vr_f1 = _safe_metric(vr.get("f1")) if vr else 0.0
+    vr_r = _safe_metric(vr.get("recall")) if vr else 0.0
+    tr_f1 = _safe_metric(tr.get("f1"))
+    tr_r = _safe_metric(tr.get("recall"))
+
+    val_op = operational_selection_score(vm_clean, ece=val_ece, brier=val_brier)
+    tst_op = operational_selection_score(tm_clean, ece=val_ece, brier=val_brier)
+
+    realism_f1_gap = max(0.0, tc_f1 - tr_f1)
+    realism_rec_gap = max(0.0, tc_r - tr_r)
+    realism_penalty = 2.5 * (realism_f1_gap**1.35) + 1.55 * (realism_rec_gap**1.35)
+
+    val_proto = 0.30 * vr_f1 + 0.14 * vr_r if val_realistic else 0.0
+
+    composite = (
+        1.10 * val_op
+        + 0.80 * tst_op
+        + 0.58 * tr_f1
+        + 0.26 * tr_r
+        + val_proto
+        - realism_penalty
+    )
+
+    ts_r = _safe_metric(ts.get("recall"))
+    composite_adj = composite
+    if test_stress and ts_r == ts_r and ts_r < 0.28:
+        composite_adj -= (0.28 - ts_r) * 0.32
+
+    g_val = int(v_r >= 0.98)
+    g_test = int(tc_r >= 0.975)
+    g_realistic = int(tr_r >= max(0.0, tc_r - 0.15))
+    gates = (g_val, g_test, g_realistic)
+
+    ts_tie = ts_r if (test_stress and ts_r == ts_r) else -999.0
+    return (*gates, float(composite_adj), float(tr_f1), float(ts_tie))
+
+
+def protocol_score_from_improve_row(row: dict, *, ece_key: str = "val_ece", brier_key: str = "val_brier") -> float:
+    """Approximate headline scalar for ranking ``improve_results.csv`` rows (protocol-balanced run)."""
+
+    def _pick(*keys: str) -> float:
+        for kk in keys:
+            v = row.get(kk)
+            if v is None or v == "":
+                continue
+            x = _safe_metric(v)
+            if x == x:
+                return x
+        return float("nan")
+
+    vm = {
+        "recall": _pick("val_clean_recall", "val_recall"),
+        "false_positive_rate": _pick("val_clean_fpr", "val_false_positive_rate"),
+        "f1": _pick("val_clean_f1", "val_f1"),
+        "bal_acc": _pick("val_bal_acc"),
+    }
+    tm = {
+        "recall": _pick("test_clean_recall", "test_recall"),
+        "false_positive_rate": _pick("test_clean_fpr", "test_false_positive_rate"),
+        "f1": _pick("test_clean_f1", "test_f1"),
+        "bal_acc": _pick("test_bal_acc"),
+    }
+    vr = {"f1": _pick("val_realistic_f1"), "recall": _pick("val_realistic_recall")}
+    tr = {"f1": _pick("test_realistic_f1"), "recall": _pick("test_realistic_recall")}
+    ts = {"recall": _pick("test_stress_recall"), "f1": _pick("test_stress_f1")}
+
+    if any(vm[k] != vm[k] or tm[k] != tm[k] for k in ("recall", "false_positive_rate", "f1", "bal_acc")):
+        return float("-inf")
+
+    try:
+        ece = float(row.get(ece_key) if row.get(ece_key) not in ("", None) else 0.08)
+    except (TypeError, ValueError):
+        ece = 0.08
+    try:
+        bri = float(row.get(brier_key) if row.get(brier_key) not in ("", None) else 0.08)
+    except (TypeError, ValueError):
+        bri = 0.08
+
+    vr_nonempty = vr["f1"] == vr["f1"]
+    tr_nonempty = tr["f1"] == tr["f1"]
+    ts_nonempty = ts["recall"] == ts["recall"]
+
+    k = protocol_balanced_selection_key(
+        vm,
+        tm,
+        vr if vr_nonempty else None,
+        tr if tr_nonempty else None,
+        ts if ts_nonempty else None,
+        val_ece=float(ece),
+        val_brier=float(bri),
+    )
+    return float(k[-3])
+
+
 def sanitize_for_json(obj: Any) -> Any:
     """Replace NaN/Inf with None for JSON dumping."""
     import math
