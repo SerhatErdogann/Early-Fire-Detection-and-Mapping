@@ -153,7 +153,6 @@ CORRUPTIONS: dict[str, CorruptionFn] = {
 # ``--severities 1,2,3`` for the older multi-severity stress grid.
 REALISTIC_NOISY_SUITE: tuple[str, ...] = (
     "gauss_noise_rgb",
-    "brightness_contrast",
     "gaussian_blur",
 )
 

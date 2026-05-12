@@ -173,8 +173,8 @@ def _partition_flame_video_pairs(
     pair_ids: list[str],
     row_counts: dict[str, int],
     *,
-    target_test_frames: int = 200,
-    max_test_frame_frac: float = 0.42,
+    target_test_frames: int = 420,
+    max_test_frame_frac: float = 0.52,
 ) -> tuple[set[str], set[str], set[str]]:
     """Split ``flame_video_nofire`` **pair ids** across train/val/test.
 
@@ -187,8 +187,8 @@ def _partition_flame_video_pairs(
 
     - ``n_pairs == 1`` → all to **train** (val/test fall back to other no-fire
       sources such as binary_root and flame3).
-    - ``n_pairs == 2`` → larger pair to **train**, smaller to **val**;
-      nothing in test (test no-fire still comes from binary_root and flame3).
+    - ``n_pairs == 2`` → larger clip to **train**, smaller clip to **test** (keep val empty;
+      test gains dedicated ``flame_video_nofire`` no_fire only when ≥2 clips exist).
     - ``n_pairs >= 3`` → standard 3-way:
         * ``train`` always receives the largest pair (model sees this domain);
         * ``test`` is filled with a frame budget (greedy, largest pairs first
@@ -209,7 +209,8 @@ def _partition_flame_video_pairs(
     ordered = sorted(pairs, key=lambda pid: (-int(row_counts.get(pid, 0)), str(pid)))
 
     if n_pairs == 2:
-        return {ordered[0]}, {ordered[1]}, set()
+        # Second-smallest clip → test when possible so no_fire footage appears in evaluation.
+        return {ordered[0]}, set(), {ordered[1]}
 
     # n_pairs >= 3. Always reserve the biggest pair for train.
     train_seed = ordered[0]
@@ -324,6 +325,102 @@ def _stratified_group_split(
         split_map[gg] = "test"
 
     return d[group_col].astype(str).map(split_map).fillna("train")
+
+
+def _count_no_fire(df: pd.DataFrame, split_name: str) -> int:
+    sp = str(split_name).strip().lower()
+    m = df["split"].astype(str).str.strip().str.lower().eq(sp)
+    return int(((m) & (pd.to_numeric(df["label"], errors="coerce").fillna(0).astype(int) == 0)).sum())
+
+
+def _boost_test_no_fire_by_moving_whole_groups(
+    df: pd.DataFrame,
+    *,
+    minimum_test_no_fire: int = 100,
+    locked_sources: frozenset[str] = _SPLIT_LOCKED_SOURCES,
+    pin_train_eval_sources: frozenset[str] = frozenset(),
+    source_hints: tuple[str, ...] = ("flame_video_nofire", "flame3", "binary"),
+) -> pd.DataFrame:
+    """Move whole homogeneous **no_fire** ``split_group`` buckets from train/val → test.
+
+    Never touches ``locked_sources`` (path-authoritative rows). Skips groups that are not
+    purely label 0. ``pin_train_eval_sources`` lists sources whose rows must stay on their
+    current split **train** assignments (typically ``cart_aux`` when ``--cart_in_eval none``).
+    """
+    if df.empty or minimum_test_no_fire <= 0:
+        return df
+    out = df.copy()
+    out["split"] = out["split"].astype(str).str.strip().str.lower().replace("", "train")
+    nf = _count_no_fire(out, "test")
+    if nf >= int(minimum_test_no_fire):
+        return out
+
+    uniq_sources = sorted({str(s) for s in df["source"].astype(str).tolist() if str(s)})
+    tail = [s for s in uniq_sources if s not in source_hints]
+    prioritized = tuple(dict.fromkeys(list(source_hints) + tail))
+
+    def _prior_index(src: str) -> int:
+        try:
+            return int(prioritized.index(str(src)))
+        except ValueError:
+            return 999
+
+    def _collect_candidates(dfx: pd.DataFrame, donor: str) -> list[tuple[str, int, str, str]]:
+        items: list[tuple[str, int, str, str]] = []
+        don = str(donor).strip().lower()
+        for sg, grp in dfx.groupby(dfx["split_group"].astype(str), sort=False):
+            if len(grp) == 0:
+                continue
+            labels = pd.to_numeric(grp["label"], errors="coerce").fillna(0).astype(int)
+            if not bool((labels == 0).all()):
+                continue
+            src = str(grp["source"].astype(str).iloc[0])
+            if src in locked_sources or src in pin_train_eval_sources:
+                continue
+            sp = str(grp["split"].astype(str).iloc[0]).strip().lower()
+            if sp != don:
+                continue
+            items.append((str(sg), int(len(grp)), src, sp))
+        return items
+
+    def _sort_key(item: tuple[str, int, str, str]) -> tuple[int, int, str]:
+        _sg, n, src, _sp = item
+        return (_prior_index(src), -int(n), str(_sg))
+
+    moved_groups = 0
+    moved_rows = 0
+    for donor in ("train", "val"):
+        while nf < int(minimum_test_no_fire):
+            pool = _collect_candidates(out, donor)
+            if not pool:
+                break
+            pool.sort(key=_sort_key)
+            sg, n, src, _sp = pool[0]
+            out.loc[out["split_group"].astype(str) == sg, "split"] = "test"
+            moved_groups += 1
+            moved_rows += int(n)
+            nf += int(n)
+            print(
+                f"[index][BOOST] moved split_group={sg!r} ({n} no_fire rows, source={src}) "
+                f"{donor} → test (running test_no_fire≈{nf})",
+                flush=True,
+            )
+        if nf >= int(minimum_test_no_fire):
+            break
+
+    if nf < int(minimum_test_no_fire) and moved_groups == 0:
+        print(
+            f"[index][BOOST][WARN] test no_fire={nf} < {minimum_test_no_fire} but no movable "
+            f"homogeneous no_fire groups (locked={sorted(locked_sources)} "
+            f"pinned={sorted(pin_train_eval_sources)}).",
+            flush=True,
+        )
+    print(
+        f"[index][BOOST] summary moved_groups={moved_groups} rows={moved_rows} "
+        f"final_test_no_fire={_count_no_fire(out,'test')} target={minimum_test_no_fire}",
+        flush=True,
+    )
+    return out
 
 
 def _files_by_stem(root: Path) -> dict[str, Path]:
@@ -1150,8 +1247,8 @@ def build_master_index(
         p_train, p_val, p_test = _partition_flame_video_pairs(
             pairs_sorted,
             {k: int(pair_counts[k]) for k in pair_counts},
-            target_test_frames=200,
-            max_test_frame_frac=0.42,
+            target_test_frames=420,
+            max_test_frame_frac=0.52,
         )
 
         fr_train = int(sum(pair_counts[p] for p in p_train if p in pair_counts))
@@ -1252,9 +1349,37 @@ def build_master_index(
             policy = "none"
         if policy == "none":
             df.loc[cart_mask, "split"] = "train"
+            print(
+                "[cart_aux] train-only (--cart_in_eval none): keeping all cart_aux rows on split=train; "
+                "test_no_fire boosts will skip cart_aux split_groups.",
+                flush=True,
+            )
         elif policy in ("val", "test"):
             df.loc[cart_mask, "split"] = policy
         print(f"[cart] policy={policy} | rows={n_cart} (split applied)", flush=True)
+
+    pin_cart_boost = frozenset({"cart_aux"}) if (n_cart > 0 and policy == "none") else frozenset()
+    df = _boost_test_no_fire_by_moving_whole_groups(
+        df,
+        minimum_test_no_fire=100,
+        pin_train_eval_sources=pin_cart_boost,
+    )
+
+    print("=== split objectives (row counts; fire=yes label 1 / no-fire=label 0) ===")
+    for sp in ("train", "val", "test"):
+        m_sp = df["split"].astype(str).str.strip().str.lower().eq(sp)
+        lab = pd.to_numeric(df.loc[m_sp, "label"], errors="coerce").fillna(0).astype(int)
+        n_fire = int((lab == 1).sum())
+        n_nf = int((lab == 0).sum())
+        print(f"[split:{sp}] total={len(lab)} fire={n_fire} no_fire={n_nf}", flush=True)
+
+    print("=== split objectives (sources: rows per split) ===")
+    for sp in ("train", "val", "test"):
+        m_sp = df["split"].astype(str).str.strip().str.lower().eq(sp)
+        sc = df.loc[m_sp, "source"].astype(str).value_counts()
+        tops = "; ".join(f"{k}:{int(sc[k])}" for k in sc.index[:12])
+        more = f" (+{len(sc) - 12} more)" if len(sc) > 12 else ""
+        print(f"[split:{sp}] sources | {tops}{more}", flush=True)
 
     print("=== split x label ===")
     print(df.groupby(["split", "label"]).size().unstack(fill_value=0).to_string())
@@ -1276,15 +1401,17 @@ def build_master_index(
 
     _summarize_disk_paths_maybe_missing(df)
 
-    test_mask = df["split"].astype(str) == "test"
-    val_mask = df["split"].astype(str) == "val"
-
-    test_no_fire = int(((test_mask) & (df["label"] == 0)).sum())
-    val_no_fire = int(((val_mask) & (df["label"] == 0)).sum())
-    if test_no_fire < 200:
+    train_no_fire = _count_no_fire(df, "train")
+    val_no_fire = _count_no_fire(df, "val")
+    test_no_fire = _count_no_fire(df, "test")
+    print(
+        f"[index] no_fire row counts train={train_no_fire} val={val_no_fire} test={test_no_fire}",
+        flush=True,
+    )
+    if test_no_fire < 100:
         print(
-            f"[index][WARN] test no_fire={test_no_fire} (<200): "
-            "FPR / specificity estimates on test will be noisy.",
+            f"[index][WARN] test no_fire={test_no_fire} (<100): "
+            "FPR / specificity on test will be unreliable — add no_fire clips or widen movable sources.",
             flush=True,
         )
     if val_no_fire < 200:

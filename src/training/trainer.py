@@ -1600,9 +1600,9 @@ def train_one_run(
                 "worst_source_by_recall": worst_source_by_recall,
                 "eval_protocol_notes": (
                     "val_clean/test_clean: laboratory-style held-out split (threshold tuned on clean "
-                    "validation). val_realistic/test_realistic: mean over gauss_noise_rgb, "
-                    "brightness_contrast, gaussian_blur @ severity 1 (drone/camera-realistic perturbations "
-                    "at eval time only). test_stress: mean over the same trio @ severity 2 plus "
+                    "validation). val_realistic/test_realistic: mean over gauss_noise_rgb and "
+                    "gaussian_blur @ severity 1 (drone/camera-realistic RGB noise + blur at eval time only). "
+                    "test_stress: mean over gauss_noise_rgb, brightness_contrast, gaussian_blur @ severity 2 plus "
                     "thermal_shift @ severity 1 (heavier degradation; weaker influence on checkpoint "
                     "selection than clean/realistic blocks)."
                 ),

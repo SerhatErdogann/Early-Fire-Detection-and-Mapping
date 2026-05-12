@@ -59,9 +59,10 @@ def _protocol_metrics_table(row: pd.Series) -> str:
     lines.append("")
     lines.append(
         "_Interpretation: **clean** = no input corruptions (standard split). "
-        "**realistic** = mean over `gauss_noise_rgb`, `brightness_contrast`, "
-        "`gaussian_blur` at severity 1 (forward-time only; not used in training/inference). "
-        "**stress** = same trio at severity 2 plus `thermal_shift` at severity 1; "
+        "**realistic** = mean over `gauss_noise_rgb` and `gaussian_blur` at severity 1 "
+        "(forward-time only; not used in training/inference). "
+        "**stress** = gauss_noise_rgb, brightness_contrast, gaussian_blur @ severity 2 plus "
+        "`thermal_shift` @ severity 1; "
         "reported for engineering visibility and only weakly weighted in checkpoint picks._\n"
     )
     return "\n".join(lines)
