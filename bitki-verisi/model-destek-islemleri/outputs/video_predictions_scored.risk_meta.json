@@ -1,0 +1,19 @@
+{
+  "risk_weights_used": {
+    "prob_fire_cal": 0.35,
+    "peak_intensity": 0.2,
+    "largest_component_area": 0.2,
+    "temporal_persistence": 0.15,
+    "mask_growth_rate": 0.1
+  },
+  "temperature_from_ckpt": 1.0,
+  "probability_column_used": "decision_prob",
+  "persistence_threshold": 0.65,
+  "weights_used": {
+    "prob_fire_cal": 0.35,
+    "peak_intensity": 0.2,
+    "largest_component_area": 0.2,
+    "temporal_persistence": 0.15,
+    "mask_growth_rate": 0.1
+  }
+}
