@@ -115,12 +115,11 @@ def main():
     )
     ap.add_argument(
         "--selection_metric",
-        choices=["f1_balacc", "realistic", "recall_fpr", "protocol_balanced"],
-        default="protocol_balanced",
+        choices=["f1_balacc", "realistic", "recall_fpr"],
+        default="realistic",
         help=(
-            "Checkpoint seçimi: f1_balacc, realistic "
-            "(F1+bal_acc+AP−FPR), recall_fpr (yakalama kapısı + operasyonel bileşik), "
-            "protocol_balanced (clean val/test + realistic eval bantları; stress hafif)."
+            "Checkpoint selection: f1_balacc | realistic (F1+bal_acc+AP−FPR on protocol-noisy val) "
+            "| recall_fpr (recall gate + calibration-aware composite)."
         ),
     )
     ap.add_argument(

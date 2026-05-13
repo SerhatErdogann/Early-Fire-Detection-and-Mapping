@@ -1,37 +1,10 @@
-"""Robustness evaluation for trained fire-detection checkpoints.
+"""Offline corruption evaluation for trained checkpoints.
 
-Measures how much the model degrades when its inputs are perturbed by
-controlled corruptions (Gaussian noise on RGB / thermal, brightness/contrast
-shift, Gaussian blur, thermal value shift). The corruptions are applied
-**after** the regular inference preprocessing, so:
+Default CLI matches training protocol: ``gauss_noise_rgb`` @ severity **1**
+(RGB/fusion); thermal-only checkpoints use ``gauss_noise_thermal`` @ severity **1**.
+Corruptions run **only** during this eval forward path (not in training/inference UI).
 
-  * the ``clean`` row equals the standard val/test evaluation;
-  * nothing in this module is reachable from ``src/inference/*`` or the
-    Streamlit UI — production predictions stay corruption-free.
-
-Usage example:
-
-.. code-block:: bash
-
-    python -m src.eval.robustness_eval \\
-        --ckpt models/dual_branch.pt \\
-        --csv data/master_index.parquet \\
-        --split test \\
-        --corruptions all \\
-        --severities 1 \\
-        --out outputs/robustness_eval.csv
-
-Pass ``--severities 1,2,3`` for the full stress grid (higher severities are no longer the
-headline metric in training reports; they remain useful for debugging).
-
-For checkpoints trained with ``--thermal_norm train_zscore``, ``thermal_mu`` and
-``thermal_sigma`` are read from the checkpoint and/or ``outputs/metrics_*.json``.
-Override with ``--thermal_mu`` / ``--thermal_sigma`` or ``--metrics_json`` if needed.
-
-The output CSV has one row per (corruption, severity) and reports
-``n``, ``acc``, ``bal_acc``, ``f1``, ``recall``, ``precision``,
-``specificity``, ``false_positive_rate``, ``auc``, ``ap`` evaluated at the
-checkpoint's saved decision threshold.
+Optional ``--legacy_grid`` restores the wider (corruption × severity) sweep incl. ``clean``.
 """
 from __future__ import annotations
 
@@ -148,31 +121,11 @@ CORRUPTIONS: dict[str, CorruptionFn] = {
     "thermal_shift": _thermal_shift,
 }
 
-# Realistic sensor / drone-style corruptions aggregated next to clean test metrics.
-# ``run_robustness`` defaults to severity **1** only for the sweep CSV; pass
-# ``--severities 1,2,3`` for the older multi-severity stress grid.
-REALISTIC_NOISY_SUITE: tuple[str, ...] = (
-    "gauss_noise_rgb",
-    "gaussian_blur",
-)
-
-
-def _bundle_pair_applies(mode: str, corruption_name: str) -> bool:
-    mode_l = str(mode).lower()
-    cand = _resolve_corruptions(str(corruption_name), mode_l)
-    return cand and cand[0] == str(corruption_name)
-
-
-REALISTIC_EVAL_BUNDLE: tuple[tuple[str, int], ...] = tuple(
-    (n, 1) for n in REALISTIC_NOISY_SUITE
-)
-# Heavier stress curve: RGB-style corruptions at severity 2 + mild thermal drift (sev1).
-STRESS_EVAL_BUNDLE: tuple[tuple[str, int], ...] = (
-    ("gauss_noise_rgb", 2),
-    ("brightness_contrast", 2),
-    ("gaussian_blur", 2),
-    ("thermal_shift", 1),
-)
+def protocol_corruption(mode: str) -> tuple[str, int]:
+    """Single operational eval corruption (name, severity), matching the training protocol."""
+    if str(mode).lower() == "thermal":
+        return ("gauss_noise_thermal", 1)
+    return ("gauss_noise_rgb", 1)
 
 
 def _resolve_corruptions(spec: str, mode: str) -> list[str]:
@@ -196,10 +149,10 @@ def _resolve_corruptions(spec: str, mode: str) -> list[str]:
 
 
 def realistic_noisy_corruption_names(mode: str) -> list[str]:
-    """Corruptions from :data:`REALISTIC_NOISY_SUITE` that apply to ``mode`` (rgb/thermal/fusion)."""
-    want = set(REALISTIC_NOISY_SUITE)
-    resolved = _resolve_corruptions(",".join(REALISTIC_NOISY_SUITE), str(mode).lower())
-    return [n for n in resolved if n in want]
+    """Corruption name(s) active for protocol eval on ``mode``."""
+    cn, _ = protocol_corruption(mode)
+    resolved = _resolve_corruptions(str(cn), str(mode).lower())
+    return [n for n in resolved if n == cn]
 
 
 # ---------------------------------------------------------------------------
@@ -312,115 +265,37 @@ def _row_for(ys: np.ndarray, probs: np.ndarray, threshold: float, name: str, sev
 
 
 @torch.inference_mode()
-def evaluate_corruption_bundle_mean(
+def eval_logits_corrupted(
     model: torch.nn.Module,
     loader: DataLoader,
     device: str,
-    temperature: float,
-    threshold: float,
-    mode: str,
-    bundle: Iterable[tuple[str, int]],
     *,
+    corruption_name: str,
+    severity: int,
     seed: int = 0,
-    label: str = "bundle",
-) -> dict[str, Any]:
-    """Apply each (corruption, severity) on ``loader`` forwards; return mean scalar metrics + components.
-
-    Pairs that do not apply to ``mode`` (e.g. thermal-only on RGB checkpoints) are skipped.
-    """
+    max_batches: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Forward pass logits with corruption on inputs (temperature applied later by trainer)."""
     torch.manual_seed(int(seed))
     np.random.seed(int(seed))
-    mode_l = str(mode).lower()
-    pairs: list[tuple[str, int]] = []
-    for name, sev in bundle:
-        if not _bundle_pair_applies(mode_l, name):
-            continue
-        if name not in CORRUPTIONS:
-            continue
-        pairs.append((str(name), int(sev)))
-
-    if not pairs:
-        return {
-            "acc": float("nan"),
-            "bal_acc": float("nan"),
-            "precision": float("nan"),
-            "recall": float("nan"),
-            "f1": float("nan"),
-            "specificity": float("nan"),
-            "false_positive_rate": float("nan"),
-            "auc": float("nan"),
-            "ap": float("nan"),
-            "n_corruptions": 0,
-            "components": [],
-            "note": f"no applicable corruptions in bundle for mode={mode_l!r} ({label})",
-        }
-
-    components: list[dict[str, Any]] = []
-    for name, sev in pairs:
-        fn = CORRUPTIONS[name]
-        ys, probs = _eval_loader(model, loader, device, float(temperature), fn, sev)
-        m = metrics_at_threshold(ys, probs, float(threshold))
-        components.append(
-            {
-                "corruption": name,
-                "severity": sev,
-                "acc": float(m.get("acc", float("nan"))),
-                "bal_acc": float(m.get("bal_acc", float("nan"))),
-                "precision": float(m.get("precision", float("nan"))),
-                "recall": float(m.get("recall", float("nan"))),
-                "f1": float(m.get("f1", float("nan"))),
-                "specificity": float(m.get("specificity", float("nan"))),
-                "false_positive_rate": float(m.get("false_positive_rate", float("nan"))),
-                "auc": float(m.get("auc", float("nan"))),
-                "ap": float(m.get("ap", float("nan"))),
-            }
-        )
-
-    def _nm(k: str) -> float:
-        return float(np.nanmean(np.asarray([float(c[k]) for c in components], dtype=np.float64)))
-
-    note_names = [f"{n}@{s}" for n, s in pairs]
-    return {
-        "acc": _nm("acc"),
-        "bal_acc": _nm("bal_acc"),
-        "precision": _nm("precision"),
-        "recall": _nm("recall"),
-        "f1": _nm("f1"),
-        "specificity": _nm("specificity"),
-        "false_positive_rate": _nm("false_positive_rate"),
-        "auc": _nm("auc"),
-        "ap": _nm("ap"),
-        "n_corruptions": len(components),
-        "components": components,
-        "note": f"mean over [{', '.join(note_names)}] (mode={mode_l}, {label})",
-    }
-
-
-@torch.inference_mode()
-def realistic_noisy_test_metrics(
-    model: torch.nn.Module,
-    loader: DataLoader,
-    device: str,
-    temperature: float,
-    threshold: float,
-    mode: str,
-    *,
-    severity: int = 1,
-    seed: int = 0,
-) -> dict[str, Any]:
-    """Backward-compatible alias (realistic suite at a single severity across all members)."""
-    bundle = tuple((n, int(severity)) for n in REALISTIC_NOISY_SUITE)
-    return evaluate_corruption_bundle_mean(
-        model,
-        loader,
-        device,
-        temperature,
-        threshold,
-        mode,
-        bundle,
-        seed=int(seed),
-        label="realistic",
-    )
+    fn = CORRUPTIONS[str(corruption_name)]
+    ys: list[int] = []
+    logits_list: list[np.ndarray] = []
+    bi = 0
+    model.eval()
+    for xb, yb in loader:
+        xb = xb.to(device, non_blocking=False)
+        xb = fn(xb, int(severity))
+        with torch.no_grad():
+            logits = model(xb)
+        logits_list.append(logits.detach().cpu().numpy())
+        ys.extend(yb.detach().cpu().numpy().astype(int).tolist())
+        bi += 1
+        if max_batches is not None and bi >= int(max_batches):
+            break
+    if not logits_list:
+        return np.asarray([], dtype=np.int64), np.zeros((0, 2), dtype=np.float32)
+    return np.asarray(ys, dtype=np.int64), np.concatenate(logits_list, axis=0)
 
 
 def _parse_severities(spec: str) -> list[int]:
@@ -459,8 +334,12 @@ def run_robustness(
     thermal_mu: float | None = None,
     thermal_sigma: float | None = None,
     metrics_json: str | None = None,
+    legacy_grid: bool = False,
 ) -> pd.DataFrame:
-    """Run the full robustness sweep and (optionally) write a CSV."""
+    """Evaluate checkpoint; default is protocol-only (:func:`protocol_corruption` @ sev 1).
+
+    Pass ``legacy_grid=True`` for clean row + arbitrary ``corruptions``/``severities`` sweep.
+    """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.manual_seed(int(seed))
     np.random.seed(int(seed))
@@ -480,14 +359,19 @@ def run_robustness(
     if len(df_split) == 0:
         raise SystemExit(f"No rows available for split={split!r} after filtering.")
 
-    if isinstance(corruptions, str):
-        corr_names = _resolve_corruptions(corruptions, info["mode"])
+    proto_c, proto_s = protocol_corruption(str(info["mode"]))
+    if legacy_grid:
+        if isinstance(corruptions, str):
+            corr_names = _resolve_corruptions(corruptions, info["mode"])
+        else:
+            corr_names = list(corruptions)
+        if isinstance(severities, str):
+            sev_list = _parse_severities(severities)
+        else:
+            sev_list = [int(s) for s in severities if 1 <= int(s) <= 3]
     else:
-        corr_names = list(corruptions)
-    if isinstance(severities, str):
-        sev_list = _parse_severities(severities)
-    else:
-        sev_list = [int(s) for s in severities if 1 <= int(s) <= 3]
+        corr_names = [proto_c]
+        sev_list = [int(proto_s)]
 
     thermal_norm = thermal_norm_from_checkpoint(ck)
     th_mu, th_sigma = resolve_thermal_calibration_or_exit(
@@ -523,13 +407,14 @@ def run_robustness(
 
     rows: list[dict] = []
 
-    ys_clean, probs_clean = _eval_loader(model, loader, device, temperature, corruption=None, severity=0)
-    rows.append(_row_for(ys_clean, probs_clean, threshold, "clean", 0))
-    print(
-        f"[robustness] clean acc={rows[-1]['acc']:.3f} f1={rows[-1]['f1']:.3f} "
-        f"recall={rows[-1]['recall']:.3f} fpr={rows[-1]['false_positive_rate']:.3f} "
-        f"auc={rows[-1]['auc']:.3f} ap={rows[-1]['ap']:.3f}"
-    )
+    if legacy_grid:
+        ys_clean, probs_clean = _eval_loader(model, loader, device, temperature, corruption=None, severity=0)
+        rows.append(_row_for(ys_clean, probs_clean, threshold, "clean", 0))
+        print(
+            f"[robustness][legacy_grid] clean acc={rows[-1]['acc']:.3f} f1={rows[-1]['f1']:.3f} "
+            f"recall={rows[-1]['recall']:.3f} fpr={rows[-1]['false_positive_rate']:.3f} "
+            f"auc={rows[-1]['auc']:.3f} ap={rows[-1]['ap']:.3f}"
+        )
 
     for name in corr_names:
         fn = CORRUPTIONS[name]
@@ -563,6 +448,8 @@ def run_robustness(
                     "thermal_sigma": th_sigma,
                     "corruptions": corr_names,
                     "severities": sev_list,
+                    "legacy_grid": bool(legacy_grid),
+                    "protocol_default": (not legacy_grid),
                     "n_rows": int(len(df_split)),
                 },
                 indent=2,
@@ -583,17 +470,15 @@ def main() -> int:
     ap.add_argument("--split", default="test", choices=["val", "test", "all"], help="Which rows to evaluate.")
     ap.add_argument(
         "--corruptions",
-        default="all",
+        default="gauss_noise_rgb",
         help=(
-            "Comma-separated corruption names or 'all'. Available: "
-            "gauss_noise_rgb, gauss_noise_thermal, brightness_contrast, gaussian_blur, thermal_shift."
+            "Legacy-grid only: comma-separated corruption names or 'all'. Ignored unless --legacy-grid."
         ),
     )
     ap.add_argument(
         "--severities",
         default="1",
-        help="Comma-separated severity levels (1=mild, 2=medium, 3=strong). Default `1` for the "
-        "main realistic sweep; use `1,2,3` for the older stress grid.",
+        help="Legacy-grid only: comma-separated severities (1–3). Ignored unless --legacy-grid.",
     )
     ap.add_argument("--out", default="outputs/robustness_eval.csv", help="Output CSV path.")
     ap.add_argument("--bs", type=int, default=16)
@@ -619,6 +504,12 @@ def main() -> int:
         default=None,
         help="Override thermal std for train_zscore / global_zscore (use with --thermal_mu).",
     )
+    ap.add_argument(
+        "--legacy-grid",
+        action="store_true",
+        help="Include clean baseline row and honor --corruptions/--severities sweep (legacy debugging). "
+        "Default: protocol corruption only gauss_noise_rgb@1 or gauss_noise_thermal@1.",
+    )
     args = ap.parse_args()
 
     run_robustness(
@@ -637,6 +528,7 @@ def main() -> int:
         thermal_mu=args.thermal_mu,
         thermal_sigma=args.thermal_sigma,
         metrics_json=args.metrics_json,
+        legacy_grid=bool(args.legacy_grid),
     )
     return 0
 

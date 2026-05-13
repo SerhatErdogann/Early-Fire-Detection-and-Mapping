@@ -1,4 +1,4 @@
-"""Training-time metric reporting: source breakdowns and threshold sweep tables."""
+"""Training-time helpers: per-source metrics, JSON sanitation, selection scores."""
 from __future__ import annotations
 
 import warnings
@@ -245,107 +245,6 @@ def _source_threshold_recommendations_impl(
     return out
 
 
-def threshold_sweep_grid(
-    vy: np.ndarray,
-    vp: np.ndarray,
-    ty: np.ndarray,
-    tp: np.ndarray,
-    thresholds: np.ndarray | list[float] | None = None,
-) -> pd.DataFrame:
-    """Dense table of metrics at each threshold on val / test splits."""
-    if thresholds is None:
-        thresholds = np.arange(0.10, 0.901, 0.05)
-    rows: list[dict[str, Any]] = []
-    for t in thresholds:
-        t = float(t)
-        mv = metrics_at_threshold(vy, vp, t)
-        mt = metrics_at_threshold(ty, tp, t)
-        row: dict[str, Any] = {
-            "threshold": t,
-            "val_acc": mv["acc"],
-            "val_f1": mv["f1"],
-            "val_recall": mv["recall"],
-            "val_precision": mv["precision"],
-            "val_bal_acc": mv["bal_acc"],
-            "val_specificity": mv["specificity"],
-            "val_false_positive_rate": mv["false_positive_rate"],
-            "test_acc": mt["acc"],
-            "test_f1": mt["f1"],
-            "test_recall": mt["recall"],
-            "test_precision": mt["precision"],
-            "test_bal_acc": mt["bal_acc"],
-            "test_specificity": mt["specificity"],
-            "test_false_positive_rate": mt["false_positive_rate"],
-        }
-        row["realistic_score_val"] = realistic_selection_score(mv)
-        row["realistic_score_test"] = realistic_selection_score(mt)
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
-def select_threshold_policies(grid: pd.DataFrame) -> dict[str, dict[str, Any]]:
-    """
-    Heuristic policies on the sweep table (threshold chosen on **val** metrics).
-
-    - high_recall: maximize val recall, tie-break maximize val specificity
-    - balanced: maximize val F1
-    - low_false_alarm: minimize val FPR, tie-break maximize val_f1
-    """
-    if grid is None or len(grid) == 0:
-        return {}
-
-    hr = grid.sort_values(by=["val_recall", "val_specificity"], ascending=[False, False]).iloc[0]
-    balanced = grid.sort_values(by=["val_f1", "realistic_score_val"], ascending=[False, False]).iloc[0]
-    lfa = grid.sort_values(by=["val_false_positive_rate", "val_f1"], ascending=[True, False]).iloc[0]
-
-    def pack(row: pd.Series, split: str) -> dict[str, Any]:
-        t = float(row["threshold"])
-        if split == "val":
-            return {
-                "threshold": t,
-                "acc": float(row["val_acc"]),
-                "f1": float(row["val_f1"]),
-                "recall": float(row["val_recall"]),
-                "precision": float(row["val_precision"]),
-                "bal_acc": float(row["val_bal_acc"]),
-                "specificity": float(row["val_specificity"]),
-                "false_positive_rate": float(row["val_false_positive_rate"]),
-                "realistic_score": float(row["realistic_score_val"]),
-            }
-        return {
-            "threshold": t,
-            "acc": float(row["test_acc"]),
-            "f1": float(row["test_f1"]),
-            "recall": float(row["test_recall"]),
-            "precision": float(row["test_precision"]),
-            "bal_acc": float(row["test_bal_acc"]),
-            "specificity": float(row["test_specificity"]),
-            "false_positive_rate": float(row["test_false_positive_rate"]),
-            "realistic_score": float(row["realistic_score_test"]),
-        }
-
-    return {
-        "high_recall": {
-            "threshold": float(hr["threshold"]),
-            "val": pack(hr, "val"),
-            "test": pack(hr, "test"),
-            "strategy": "max val_recall, tie_break val_specificity",
-        },
-        "balanced": {
-            "threshold": float(balanced["threshold"]),
-            "val": pack(balanced, "val"),
-            "test": pack(balanced, "test"),
-            "strategy": "max val_f1",
-        },
-        "low_false_alarm": {
-            "threshold": float(lfa["threshold"]),
-            "val": pack(lfa, "val"),
-            "test": pack(lfa, "test"),
-            "strategy": "min val_false_positive_rate, tie_break val_f1",
-        },
-    }
-
-
 def _safe_metric(x: Any, default: float = 0.0) -> float:
     """Return a finite float for ``x`` (NaN / non-numeric -> ``default``)."""
     try:
@@ -353,6 +252,30 @@ def _safe_metric(x: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return float(default)
     return float(default) if v != v or v in (float("inf"), float("-inf")) else v
+
+
+def sanitize_for_json(obj: Any) -> Any:
+    """Replace NaN/Inf with None for JSON dumping."""
+    import math
+
+    if obj is None:
+        return None
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, (np.integer, np.int64)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        x = float(obj)
+        if math.isnan(x) or math.isinf(x):
+            return None
+        return x
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize_for_json(x) for x in obj]
+    return obj
 
 
 def realistic_selection_score(vm: dict) -> float:
@@ -407,10 +330,10 @@ def recall_fpr_selection_key(vm: dict, *, ece: float = 0.0, brier: float = 0.0) 
     return (meets, op, rec, -fpr, bal, f1)
 
 
-def operational_score_from_test_row(row: dict, *, ece_key: str = "val_ece", brier_key: str = "val_brier") -> float:
-    """Composite score from an ``improve_results.csv`` row using ``test_*`` metrics."""
+def operational_score_from_improve_realistic_row(row: dict) -> float:
+    """Operational composite from ``test_realistic_*`` (and optional calibration columns)."""
 
-    def _cell_float(key: str, default: float) -> float:
+    def _cell(key: str, default: float) -> float:
         v = row.get(key)
         if v is None or v == "":
             return default
@@ -422,153 +345,25 @@ def operational_score_from_test_row(row: dict, *, ece_key: str = "val_ece", brie
             return default
         return x
 
+    recall = _cell("test_realistic_recall", 0.0)
+    fpr = _cell("test_realistic_fpr", 0.0)
+    # ``improve_results`` row may omit bal_acc — approximate from recall & FPR proxy.
+    bal_proxy = max(0.0, min(1.0, 0.5 * (recall + max(0.0, 1.0 - fpr))))
     vm = {
-        "recall": row.get("test_recall"),
-        "false_positive_rate": row.get("test_false_positive_rate"),
-        "f1": row.get("test_f1"),
-        "bal_acc": row.get("test_bal_acc"),
+        "recall": row.get("test_realistic_recall"),
+        "false_positive_rate": row.get("test_realistic_fpr"),
+        "f1": row.get("test_realistic_f1"),
+        "bal_acc": bal_proxy,
     }
-    ece = _cell_float(ece_key, 0.08)
-    bri = _cell_float(brier_key, 0.08)
-    return operational_selection_score(vm, ece=ece, brier=bri)
-
-
-def protocol_balanced_selection_key(
-    vm_clean: dict,
-    tm_clean: dict,
-    val_realistic: dict | None,
-    test_realistic: dict | None,
-    test_stress: dict | None,
-    *,
-    val_ece: float,
-    val_brier: float,
-) -> tuple:
-    """Epoch checkpoint sorting key when ``selection_metric protocol_balanced`` is enabled.
-
-    Lexicographically **larger is better**.
-    Prefer strong **clean val/test**, keep **realistic test** reasonably close behind clean test,
-    reward **realistic val**, use **stress test recall** only as a weak tie-break (light penalty when
-    stress recall collapses; never dominates the headline score).
-    """
-    v_r = _safe_metric(vm_clean.get("recall"))
-    tc_r = _safe_metric(tm_clean.get("recall"))
-    tc_f1 = _safe_metric(tm_clean.get("f1"))
-    vr = val_realistic or {}
-    tr = test_realistic or {}
-    ts = test_stress or {}
-    vr_f1 = _safe_metric(vr.get("f1")) if vr else 0.0
-    vr_r = _safe_metric(vr.get("recall")) if vr else 0.0
-    tr_f1 = _safe_metric(tr.get("f1"))
-    tr_r = _safe_metric(tr.get("recall"))
-
-    val_op = operational_selection_score(vm_clean, ece=val_ece, brier=val_brier)
-    tst_op = operational_selection_score(tm_clean, ece=val_ece, brier=val_brier)
-
-    realism_f1_gap = max(0.0, tc_f1 - tr_f1)
-    realism_rec_gap = max(0.0, tc_r - tr_r)
-    realism_penalty = 2.5 * (realism_f1_gap**1.35) + 1.55 * (realism_rec_gap**1.35)
-
-    val_proto = 0.30 * vr_f1 + 0.14 * vr_r if val_realistic else 0.0
-
-    composite = (
-        1.10 * val_op
-        + 0.80 * tst_op
-        + 0.58 * tr_f1
-        + 0.26 * tr_r
-        + val_proto
-        - realism_penalty
+    return operational_selection_score(
+        vm, ece=_cell("val_ece", 0.08), brier=_cell("val_brier", 0.08)
     )
 
-    ts_r = _safe_metric(ts.get("recall"))
-    composite_adj = composite
-    if test_stress and ts_r == ts_r and ts_r < 0.28:
-        composite_adj -= (0.28 - ts_r) * 0.32
 
-    g_val = int(v_r >= 0.98)
-    g_test = int(tc_r >= 0.975)
-    g_realistic = int(tr_r >= max(0.0, tc_r - 0.15))
-    gates = (g_val, g_test, g_realistic)
-
-    ts_tie = ts_r if (test_stress and ts_r == ts_r) else -999.0
-    return (*gates, float(composite_adj), float(tr_f1), float(ts_tie))
+# Back-compat for scripts that still import the old name.
+operational_score_from_test_row = operational_score_from_improve_realistic_row
 
 
-def protocol_score_from_improve_row(row: dict, *, ece_key: str = "val_ece", brier_key: str = "val_brier") -> float:
-    """Approximate headline scalar for ranking ``improve_results.csv`` rows (protocol-balanced run)."""
-
-    def _pick(*keys: str) -> float:
-        for kk in keys:
-            v = row.get(kk)
-            if v is None or v == "":
-                continue
-            x = _safe_metric(v)
-            if x == x:
-                return x
-        return float("nan")
-
-    vm = {
-        "recall": _pick("val_clean_recall", "val_recall"),
-        "false_positive_rate": _pick("val_clean_fpr", "val_false_positive_rate"),
-        "f1": _pick("val_clean_f1", "val_f1"),
-        "bal_acc": _pick("val_bal_acc"),
-    }
-    tm = {
-        "recall": _pick("test_clean_recall", "test_recall"),
-        "false_positive_rate": _pick("test_clean_fpr", "test_false_positive_rate"),
-        "f1": _pick("test_clean_f1", "test_f1"),
-        "bal_acc": _pick("test_bal_acc"),
-    }
-    vr = {"f1": _pick("val_realistic_f1"), "recall": _pick("val_realistic_recall")}
-    tr = {"f1": _pick("test_realistic_f1"), "recall": _pick("test_realistic_recall")}
-    ts = {"recall": _pick("test_stress_recall"), "f1": _pick("test_stress_f1")}
-
-    if any(vm[k] != vm[k] or tm[k] != tm[k] for k in ("recall", "false_positive_rate", "f1", "bal_acc")):
-        return float("-inf")
-
-    try:
-        ece = float(row.get(ece_key) if row.get(ece_key) not in ("", None) else 0.08)
-    except (TypeError, ValueError):
-        ece = 0.08
-    try:
-        bri = float(row.get(brier_key) if row.get(brier_key) not in ("", None) else 0.08)
-    except (TypeError, ValueError):
-        bri = 0.08
-
-    vr_nonempty = vr["f1"] == vr["f1"]
-    tr_nonempty = tr["f1"] == tr["f1"]
-    ts_nonempty = ts["recall"] == ts["recall"]
-
-    k = protocol_balanced_selection_key(
-        vm,
-        tm,
-        vr if vr_nonempty else None,
-        tr if tr_nonempty else None,
-        ts if ts_nonempty else None,
-        val_ece=float(ece),
-        val_brier=float(bri),
-    )
-    return float(k[-3])
-
-
-def sanitize_for_json(obj: Any) -> Any:
-    """Replace NaN/Inf with None for JSON dumping."""
-    import math
-
-    if obj is None:
-        return None
-    if isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return obj
-    if isinstance(obj, (np.integer, np.int64)):
-        return int(obj)
-    if isinstance(obj, (np.floating,)):
-        x = float(obj)
-        if math.isnan(x) or math.isinf(x):
-            return None
-        return x
-    if isinstance(obj, dict):
-        return {k: sanitize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [sanitize_for_json(x) for x in obj]
-    return obj
+def balanced_realistic_rank_score(row: dict) -> float:
+    """Blend noisy val/test F1 for balanced deployment picks."""
+    return 0.45 * _safe_metric(row.get("val_realistic_f1")) + 0.55 * _safe_metric(row.get("test_realistic_f1"))

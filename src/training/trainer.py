@@ -16,34 +16,21 @@ from torch.utils.data import DataLoader, Sampler, WeightedRandomSampler
 from tqdm import tqdm
 
 from .eval_reporting import (
-    metrics_per_source,
-    protocol_balanced_selection_key,
     recall_fpr_selection_key,
     sanitize_for_json,
-    select_threshold_policies,
     realistic_selection_score,
-    source_threshold_recommendations,
-    threshold_sweep_grid,
 )
 from .losses import build_loss
 from .metrics import (
-    eval_probs,
-    eval_logits,
     metrics_at_threshold,
     find_best_threshold_f1,
     fit_temperature,
     expected_calibration_error,
     brier_score_binary,
-    reliability_report,
     _best_threshold_mode,
 )
 from ..data import FlameDataset
-from ..eval.robustness_eval import (
-    REALISTIC_EVAL_BUNDLE,
-    STRESS_EVAL_BUNDLE,
-    evaluate_corruption_bundle_mean,
-)
-from .sequence_metrics import compute_sequence_alarm_summary
+from ..eval.robustness_eval import CORRUPTIONS, eval_logits_corrupted, protocol_corruption
 from ..data.path_filter import filter_df_existing_paths
 from ..data.split import _group_split_three_way, split_train_val_extra
 from ..models import FUSION_DUAL_FAMILIES, make_classifier, get_model_config
@@ -495,7 +482,7 @@ def train_one_run(
     inference_threshold: float | None = None,
     no_fire_weight: float = 1.0,
     fire_weight: float = 1.0,
-    selection_metric: str = "protocol_balanced",
+    selection_metric: str = "realistic",
     source_weights: str | dict | None = None,
     modal_dropout_p: float = 0.0,
     thermal_init: str = "mean_rgb",
@@ -512,6 +499,12 @@ def train_one_run(
     rgb_aug_intensity: float = 1.15,
     thermal_aug_intensity: float = 1.0,
 ):
+    sel_norm_o = str(selection_metric).strip().lower()
+    if sel_norm_o in ("protocol_balanced", "stress", "clean"):
+        print(f"[train] selection_metric={selection_metric!r} is deprecated → using realistic")
+        selection_metric = "realistic"
+    else:
+        selection_metric = sel_norm_o
     device = "cuda" if torch.cuda.is_available() else "cpu"
     use_cuda = torch.cuda.is_available()
     nw = float(no_fire_weight)
@@ -567,7 +560,7 @@ def train_one_run(
     print(f"[train] per-source labels train={_per_source_label_breakdown(tr)}")
     print(f"[train] per-source labels val={_per_source_label_breakdown(va)}")
     print(f"[train] per-source labels test={_per_source_label_breakdown(test_df)}")
-    sel_norm = str(selection_metric or "protocol_balanced").lower()
+    sel_norm = str(selection_metric or "realistic").lower()
     print(f"[train] selection_metric={sel_norm} no_fire_weight={nw} fire_weight={fw} loss_mode={loss_mode}")
     if float(modal_dropout_p) > 0.0:
         print(f"[train] modal_dropout_p={float(modal_dropout_p)} (fusion-only at input level)")
@@ -854,9 +847,6 @@ def train_one_run(
     # Tracks the best validation selection score (legacy or realistic, see sel_norm).
     best_val_score = -1.0
     best_recall_fpr_key: tuple | None = None
-    best_protocol_key: tuple | None = None
-    best_proto_fallback_key: tuple | None = None
-    best_protocol_cmp: tuple | None = None
     patience_counter = 0
 
     grad_accum_steps = max(1, int(grad_accum_steps))
@@ -982,38 +972,48 @@ def train_one_run(
             continue
 
         va_eval = va
+        corr_name, corr_sev = protocol_corruption(mode)
+        ep_seed = int(ep) * 9973 + 42
+        model.eval()
+
         if max_val_batches is not None:
-            # Build a small val loader slice by iterating a few batches
-            model.eval()
-            ys, logits_list = [], []
-            with torch.no_grad():
-                for vi, (xv, yv) in enumerate(val_loader, start=1):
-                    nb = bool(loader_common.get("pin_memory", False)) and device == "cuda"
-                    xv = xv.to(device, non_blocking=nb)
-                    logits = model(xv)
-                    logits_list.append(logits.cpu().numpy())
-                    ys.extend(yv.numpy().tolist())
-                    if vi >= int(max_val_batches):
-                        break
-            vy_log = np.asarray(ys, dtype=np.int64)
-            val_logits = np.concatenate(logits_list, axis=0) if logits_list else np.zeros((0, 2), dtype=np.float32)
-            # Keep a matching slice of `va` so per-source metrics / FP export don't mismatch lengths.
+            vy, val_logits = eval_logits_corrupted(
+                model,
+                val_loader,
+                device,
+                corruption_name=corr_name,
+                severity=corr_sev,
+                seed=ep_seed,
+                max_batches=int(max_val_batches),
+            )
             try:
-                va_eval = va.iloc[: len(vy_log)].reset_index(drop=True)
+                va_eval = va.iloc[: len(vy)].reset_index(drop=True)
             except Exception:
                 va_eval = va
         else:
-            vy_log, val_logits = eval_logits(model, val_loader, device)
-        T = fit_temperature(vy_log, val_logits)
-        vy = vy_log
+            vy, val_logits = eval_logits_corrupted(
+                model,
+                val_loader,
+                device,
+                corruption_name=corr_name,
+                severity=corr_sev,
+                seed=ep_seed,
+                max_batches=None,
+            )
+
+        if len(vy) == 0:
+            print("[val] protocol eval produced zero rows — skipping metric block for this epoch")
+            if scheduler_kind != "plateau":
+                sched.step()
+            continue
+
+        T = fit_temperature(vy, val_logits)
         vp = _probs_from_logits(val_logits, temperature=T)
         thr_f1 = find_best_threshold_f1(vy, vp)
 
-        # Threshold sweep for operating point (optimize low FPR without killing recall)
-        # Include lower thresholds for recall-focused operating points
         cand_thrs = [0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65]
         sweep = [(t, metrics_at_threshold(vy, vp, float(t))) for t in cand_thrs]
-        print("[val] threshold sweep (operating point):")
+        print(f"[val_realistic:{corr_name}@{corr_sev}] threshold sweep:")
         for t, m in sweep:
             print(
                 f"  thr={t:.2f} spec={m.get('specificity', float('nan')):.3f} "
@@ -1037,7 +1037,7 @@ def train_one_run(
         thr_oper = float(thr_oper)
         vm_oper = metrics_at_threshold(vy, vp, thr_oper)
         print(
-            f"[val] recommended_thr={thr_oper:.2f} (keep_recall>={min_keep:.3f}, "
+            f"[val_realistic] recommended_thr={thr_oper:.2f} (keep_recall>={min_keep:.3f}, "
             f"fpr={vm_oper.get('false_positive_rate', float('nan')):.3f}, "
             f"recall={vm_oper.get('recall', float('nan')):.3f})"
         )
@@ -1046,13 +1046,14 @@ def train_one_run(
         thr_default = float(thr_oper)
         if inference_threshold is not None:
             thr_default = float(inference_threshold)
-            print(f"[val] inference_threshold override -> thr_default={thr_default:.2f}")
+            print(f"[val_realistic] inference_threshold override -> thr_default={thr_default:.2f}")
         best_thr = float(thr_default)
         vm = metrics_at_threshold(vy, vp, best_thr)
         ece = expected_calibration_error(vy, vp)
         brier = brier_score_binary(vy, vp)
         print(
-            f"Val acc={vm['acc']:.3f} bal_acc={vm['bal_acc']:.3f} auc={vm['auc']:.3f} ap={vm['ap']:.3f} "
+            f"[val_realistic:{corr_name}@{corr_sev}] "
+            f"acc={vm['acc']:.3f} bal_acc={vm['bal_acc']:.3f} auc={vm['auc']:.3f} ap={vm['ap']:.3f} "
             f"thr={best_thr:.2f} (thr_f1={thr_f1:.2f}) T={T:.3f} "
             f"P={vm['precision']:.3f} R={vm['recall']:.3f} F1={vm['f1']:.3f} "
             f"spec={vm.get('specificity', float('nan')):.3f} fpr={vm.get('false_positive_rate', float('nan')):.3f} "
@@ -1066,111 +1067,31 @@ def train_one_run(
                 xg, _ = next(iter(val_loader))
                 nb = bool(loader_common.get("pin_memory", False)) and device == "cuda"
                 xg = xg.to(device, non_blocking=nb)[: min(24, len(xg))]
+                xg = CORRUPTIONS[str(corr_name)](xg, int(corr_sev))
                 with torch.no_grad():
                     logits_g, aux_g = model(xg, return_aux=True)
                 del logits_g
                 if isinstance(aux_g, dict) and "gate_rgb" in aux_g:
                     gr = float(aux_g["gate_rgb"].mean().detach().cpu())
                     gt = float(aux_g["gate_thermal"].mean().detach().cpu())
-                    print(f"[val] gated fusion mean gates (mini-batch): RGB={gr:.4f} TH={gt:.4f}")
+                    print(f"[val] gated fusion mean gates (noisy mini-batch): RGB={gr:.4f} TH={gt:.4f}")
             except Exception as eg:
                 print(f"[val] gated diagnostics skipped: {type(eg).__name__}: {eg}")
 
-        # Per-source validation metrics
-        per_source: dict[str, dict] = {}
-        if "source" in va_eval.columns:
-            srcs = va_eval["source"].astype(str).to_numpy()
-            for s in sorted(set(srcs.tolist())):
-                m = srcs == s
-                if int(m.sum()) < 5:
-                    continue
-                # Skip per-source metrics if that slice has only one class (prevents sklearn warnings)
-                if len(set(np.asarray(vy[m], dtype=np.int64).tolist())) < 2:
-                    continue
-                ms = metrics_at_threshold(vy[m], vp[m], best_thr)
-                per_source[s] = {k: (float(v) if not isinstance(v, np.ndarray) else v.tolist()) for k, v in ms.items()}
-            if per_source:
-                print(
-                    "[val] per_source metrics (thr shared):",
-                    {
-                        k: {
-                            "f1": round(v["f1"], 3),
-                            "bal_acc": round(v["bal_acc"], 3),
-                            "n": int((va_eval["source"].astype(str) == k).sum()),
-                        }
-                        for k, v in per_source.items()
-                    },
-                )
-
-        # Source-aware threshold recommendations on val: pick the threshold per
-        # source that keeps recall >= 0.98 and minimises FPR. This makes it
-        # explicit when a single source (e.g. binary_root) needs a much higher
-        # threshold than the global recommendation.
-        try:
-            src_thr_recs = source_threshold_recommendations(
-                va_eval, vy, vp, min_recall=0.98, min_samples=20
-            )
-        except Exception as exc:  # noqa: BLE001
-            src_thr_recs = {}
-            print(f"[val] source threshold sweep skipped: {type(exc).__name__}: {exc}")
-        if src_thr_recs:
-            compact = {}
-            for s, info in src_thr_recs.items():
-                if info.get("status") == "ok":
-                    compact[s] = (
-                        f"thr={info['threshold']:.2f} recall={info['recall']:.3f} fpr={info['fpr']:.3f}"
-                    )
-                elif info.get("status") == "below_recall_target":
-                    compact[s] = (
-                        f"thr={info['threshold']:.2f} recall={info['recall']:.3f} fpr={info['fpr']:.3f} "
-                        f"[recall<0.98]"
-                    )
-                elif info.get("status") == "single_class_no_recall":
-                    thr = info.get("threshold")
-                    fpr = info.get("fpr")
-                    compact[s] = (
-                        f"thr={thr:.2f} fpr={fpr:.3f} [single_class:no recall]"
-                        if thr is not None and fpr is not None
-                        else "[single_class]"
-                    )
-                else:
-                    compact[s] = f"[{info.get('status', 'skipped')}, n={info.get('n', 0)}]"
-            print("[val] per_source threshold (recall>=0.98, min FPR):", compact)
-
-        # Save false positives from validation (y=0, pred=1)
-        pred_val = (vp >= float(best_thr)).astype(np.int64)
-        fp_mask = (vy == 0) & (pred_val == 1)
-        if int(fp_mask.sum()) > 0:
-            fp_df = va_eval.loc[fp_mask].copy()
-            fp_df["prob_fire"] = vp[fp_mask].astype(np.float32)
-            # Expose label columns so downstream hard-negative retraining can
-            # distinguish genuine negatives (label=0) from mis-labelled rows.
-            if "label" not in fp_df.columns:
-                fp_df["label"] = 0
-            if "label_fire" not in fp_df.columns and "label" in fp_df.columns:
-                fp_df["label_fire"] = fp_df["label"].astype(int)
-            keep_cols = [
-                c
-                for c in [
-                    "source",
-                    "path_rgb",
-                    "path_th",
-                    "prob_fire",
-                    "label",
-                    "label_fire",
-                    "key",
-                    "split_group",
-                ]
-                if c in fp_df.columns
-            ]
-            fp_out = Path(OUTPUTS_DIR) / f"val_false_positives_{mode}_{mf}.csv"
-            fp_df[keep_cols].to_csv(fp_out, index=False)
-            print(f"[val] false_positives saved: {fp_out} (n={int(fp_mask.sum())})")
-
-        ty, tp = eval_probs(model, test_loader, device, temperature=T)
+        ty, test_logits = eval_logits_corrupted(
+            model,
+            test_loader,
+            device,
+            corruption_name=corr_name,
+            severity=corr_sev,
+            seed=ep_seed + 3,
+            max_batches=None,
+        )
+        tp = _probs_from_logits(test_logits, temperature=T)
         tm = metrics_at_threshold(ty, tp, best_thr)
         print(
-            f"Test acc={tm['acc']:.3f} bal_acc={tm['bal_acc']:.3f} auc={tm['auc']:.3f} ap={tm['ap']:.3f} "
+            f"[test_realistic:{corr_name}@{corr_sev}] "
+            f"acc={tm['acc']:.3f} bal_acc={tm['bal_acc']:.3f} auc={tm['auc']:.3f} ap={tm['ap']:.3f} "
             f"P={tm.get('precision', float('nan')):.3f} R={tm.get('recall', float('nan')):.3f} "
             f"F1={tm.get('f1', float('nan')):.3f} "
             f"spec={tm.get('specificity', float('nan')):.3f} fpr={tm.get('false_positive_rate', float('nan')):.3f}"
@@ -1179,123 +1100,31 @@ def train_one_run(
             print("Test CM [[TN FP],[FN TP]]:\n", tm["cm"])
         except Exception:
             pass
-        test_per_source = metrics_per_source(test_df, ty, tp, float(best_thr), min_samples=5)
-        if test_per_source:
-            parts = [
-                f"{k}:n={v.get('n', '')},f1={float(v.get('f1', 0.0)):.2f},spec={float(v.get('specificity', 0.0)):.2f},fpr={float(v.get('false_positive_rate', 0.0)):.2f}"
-                for k, v in list(test_per_source.items())[:10]
-            ]
-            tail = " ..." if len(test_per_source) > 10 else ""
-            print("[test] per_source (shared thr):", " | ".join(parts) + tail)
-            # Full per-source table — accuracy, bal_acc, precision, recall, F1,
-            # specificity, FPR — so binary_root / flame3 / flame_video_nofire
-            # can each be inspected as the user requested.
-            print("[test] per_source full table (acc / bal_acc / P / R / F1 / spec / FPR / n):")
-            for s in sorted(test_per_source.keys()):
-                r = test_per_source[s]
-                print(
-                    f"  {s:<22s} "
-                    f"acc={float(r.get('acc', float('nan'))):.3f} "
-                    f"bal={float(r.get('bal_acc', float('nan'))):.3f} "
-                    f"P={float(r.get('precision', float('nan'))):.3f} "
-                    f"R={float(r.get('recall', float('nan'))):.3f} "
-                    f"F1={float(r.get('f1', float('nan'))):.3f} "
-                    f"spec={float(r.get('specificity', float('nan'))):.3f} "
-                    f"fpr={float(r.get('false_positive_rate', float('nan'))):.3f} "
-                    f"n={int(r.get('n', 0))}"
-                )
-
-        skip_protocol_eval = max_val_batches is not None and int(max_val_batches) > 0
-        val_protocol_raw: dict | None = None
-        test_realistic_raw: dict | None = None
-        test_stress_raw: dict | None = None
-        if skip_protocol_eval:
-            print("[protocol] corrupted val/test bundles skipped (max_val_batches>0)")
-        else:
-            try:
-                seeds = int(ep) * 9973 + 42
-                val_protocol_raw = evaluate_corruption_bundle_mean(
-                    model,
-                    val_loader,
-                    device,
-                    float(T),
-                    float(best_thr),
-                    mode,
-                    REALISTIC_EVAL_BUNDLE,
-                    seed=seeds,
-                    label="val_realistic",
-                )
-                test_realistic_raw = evaluate_corruption_bundle_mean(
-                    model,
-                    test_loader,
-                    device,
-                    float(T),
-                    float(best_thr),
-                    mode,
-                    REALISTIC_EVAL_BUNDLE,
-                    seed=seeds + 3,
-                    label="test_realistic",
-                )
-                test_stress_raw = evaluate_corruption_bundle_mean(
-                    model,
-                    test_loader,
-                    device,
-                    float(T),
-                    float(best_thr),
-                    mode,
-                    STRESS_EVAL_BUNDLE,
-                    seed=seeds + 7,
-                    label="test_stress",
-                )
-                if val_protocol_raw and val_protocol_raw.get("n_corruptions", 0):
-                    print(
-                        f"[val_realistic] f1={float(val_protocol_raw.get('f1', float('nan'))):.3f} "
-                        f"recall={float(val_protocol_raw.get('recall', float('nan'))):.3f} "
-                        f"fpr={float(val_protocol_raw.get('false_positive_rate', float('nan'))):.3f}"
-                    )
-                if test_realistic_raw and test_realistic_raw.get("n_corruptions", 0):
-                    print(
-                        f"[test_realistic] f1={float(test_realistic_raw.get('f1', float('nan'))):.3f} "
-                        f"recall={float(test_realistic_raw.get('recall', float('nan'))):.3f} "
-                        f"fpr={float(test_realistic_raw.get('false_positive_rate', float('nan'))):.3f}"
-                    )
-                if test_stress_raw and test_stress_raw.get("n_corruptions", 0):
-                    print(
-                        f"[test_stress] f1={float(test_stress_raw.get('f1', float('nan'))):.3f} "
-                        f"recall={float(test_stress_raw.get('recall', float('nan'))):.3f} "
-                        f"fpr={float(test_stress_raw.get('false_positive_rate', float('nan'))):.3f}"
-                    )
-            except Exception as exb:
-                print(f"[protocol] bundle eval failed: {type(exb).__name__}: {exb}")
-                val_protocol_raw = None
-                test_realistic_raw = None
-                test_stress_raw = None
 
         if extra_test_loader is not None:
-            ey, ep_probs = eval_probs(model, extra_test_loader, device, temperature=T)
+            ey, extra_logits = eval_logits_corrupted(
+                model,
+                extra_test_loader,
+                device,
+                corruption_name=corr_name,
+                severity=corr_sev,
+                seed=ep_seed + 101,
+                max_batches=None,
+            )
+            ep_probs = _probs_from_logits(extra_logits, temperature=T)
             pred = (ep_probs >= best_thr).astype(np.int64)
             n_fp = int((pred == 1).sum())
             n_tn = int((pred == 0).sum())
             fp_rate = n_fp / max(1, len(ey))
-            print(f"Extra test (drone no-fire) n={len(ey)} FP={n_fp} TN={n_tn} FP_rate={fp_rate:.3f}")
+            print(
+                f"Extra test noisy ({corr_name}@{corr_sev}) n={len(ey)} "
+                f"FP={n_fp} TN={n_tn} FP_rate={fp_rate:.3f}"
+            )
 
         if scheduler_kind == "plateau":
             sched.step(vm["ap"] if vm["ap"] == vm["ap"] else 0.0)
         else:
             sched.step()
-
-        key_pb = None
-        if sel_norm == "protocol_balanced":
-            if val_protocol_raw is not None and test_realistic_raw is not None:
-                key_pb = protocol_balanced_selection_key(
-                    vm,
-                    tm,
-                    val_protocol_raw,
-                    test_realistic_raw,
-                    test_stress_raw,
-                    val_ece=float(ece),
-                    val_brier=float(brier),
-                )
 
         score_legacy = 0.5 * float(vm.get("f1", 0.0)) + 0.5 * float(vm.get("bal_acc", 0.0))
         score_realistic = realistic_selection_score(vm)
@@ -1304,36 +1133,18 @@ def train_one_run(
             if sel_norm == "recall_fpr"
             else None
         )
-        kr_protocol_fb = recall_fpr_selection_key(vm, ece=float(ece), brier=float(brier))
 
         if sel_norm == "realistic":
             selection_score = score_realistic
         elif sel_norm == "recall_fpr" and key_recall_fpr is not None:
             selection_score = float(key_recall_fpr[1])
-        elif sel_norm == "protocol_balanced" and key_pb is not None:
-            selection_score = float(key_pb[-3])
-        elif sel_norm == "protocol_balanced" and key_pb is None:
-            print(
-                "[protocol] degraded: corrupted bundle metrics unavailable; "
-                "using recall_fpr-style composite on **clean validation**."
-            )
-            selection_score = float(kr_protocol_fb[1])
         else:
             selection_score = score_legacy
 
-        # Checkpoint selection: f1_balacc | realistic | recall_fpr | protocol_balanced
-        rank_pb: tuple[float | int | tuple, ...] | None = None
         if sel_norm == "recall_fpr":
             improved = key_recall_fpr is not None and (
                 best_recall_fpr_key is None or key_recall_fpr > best_recall_fpr_key
             )
-        elif sel_norm == "protocol_balanced":
-            if key_pb is not None:
-                rank_pb = (2, float(key_pb[-3]), key_pb)
-                improved = best_protocol_cmp is None or rank_pb > best_protocol_cmp
-            else:
-                rank_pb = (1, float(kr_protocol_fb[1]), kr_protocol_fb)
-                improved = best_protocol_cmp is None or rank_pb > best_protocol_cmp
         else:
             improved = selection_score == selection_score and selection_score > best_val_score
 
@@ -1341,124 +1152,50 @@ def train_one_run(
             if sel_norm == "recall_fpr" and key_recall_fpr is not None:
                 best_recall_fpr_key = key_recall_fpr
                 best_val_score = float(key_recall_fpr[1])
-            elif sel_norm == "protocol_balanced" and rank_pb is not None:
-                best_protocol_cmp = rank_pb
-                best_val_score = float(selection_score)
-                if key_pb is not None:
-                    best_protocol_key = key_pb
-                    best_proto_fallback_key = None
-                else:
-                    best_proto_fallback_key = kr_protocol_fb
-                    best_protocol_key = None
-            elif sel_norm not in ("recall_fpr", "protocol_balanced"):
+            else:
                 best_val_score = float(selection_score)
             patience_counter = 0
             thr_alarm_raw = _best_threshold_mode(vy, vp, "alarm")
-            # Precision-biased (review) threshold is never clamped — keep strict.
             thr_review = _best_threshold_mode(vy, vp, "review")
-            # Clamp the alarm threshold from below so the production default is
-            # never dangerously permissive. We store both the raw and clamped
-            # values for transparency / sweep reports.
             thr_alarm = max(float(THRESHOLD_ALARM_MIN), float(thr_alarm_raw))
             if thr_alarm != thr_alarm_raw:
                 print(
-                    f"[val] threshold_alarm clamped {thr_alarm_raw:.3f} -> {thr_alarm:.3f} "
+                    f"[val_realistic] threshold_alarm clamped {thr_alarm_raw:.3f} -> {thr_alarm:.3f} "
                     f"(min={THRESHOLD_ALARM_MIN})"
                 )
-            # Worst-source diagnostics for the current best epoch.
-            worst_source_by_fpr = None
-            worst_source_by_recall = None
-            if per_source:
-                try:
-                    worst_source_by_fpr = max(
-                        per_source.items(),
-                        key=lambda kv: float(kv[1].get("false_positive_rate", 0.0) or 0.0),
-                    )[0]
-                    worst_source_by_recall = min(
-                        per_source.items(),
-                        key=lambda kv: float(kv[1].get("recall", 1.0) or 0.0),
-                    )[0]
-                except Exception:
-                    pass
-            threshold_policy_csv = ""
-            threshold_policies: dict = {}
-            video_event_metrics = None
-            try:
-                pol_grid = threshold_sweep_grid(vy, vp, ty, tp, thresholds=np.arange(0.10, 0.901, 0.05))
-                policy_path = Path(OUTPUTS_DIR) / f"threshold_policy_{mode}_{mf}.csv"
-                policy_path.parent.mkdir(parents=True, exist_ok=True)
-                pol_grid.to_csv(policy_path, index=False)
-                threshold_policy_csv = str(policy_path)
-                threshold_policies = select_threshold_policies(pol_grid)
-                print(f"[eval] threshold_policy_csv -> {threshold_policy_csv}")
-            except Exception as e:
-                print(f"[eval] threshold_policy sweep skipped: {type(e).__name__}: {e}")
 
-            # Source-aware threshold sweep on TEST as well so the user can see
-            # whether each domain (binary_root, flame3, flame_video_nofire)
-            # would need a different threshold to keep recall >= 0.98.
-            try:
-                test_src_thr_recs = source_threshold_recommendations(
-                    test_df, ty, tp, min_recall=0.98, min_samples=20
-                )
-            except Exception as exc:  # noqa: BLE001
-                test_src_thr_recs = {}
-                print(
-                    f"[test] source threshold sweep skipped: {type(exc).__name__}: {exc}"
-                )
-            if test_src_thr_recs:
-                compact_t = {}
-                for s, info in test_src_thr_recs.items():
-                    if info.get("status") == "ok":
-                        compact_t[s] = (
-                            f"thr={info['threshold']:.2f} R={info['recall']:.3f} "
-                            f"FPR={info['fpr']:.3f}"
-                        )
-                    elif info.get("status") == "below_recall_target":
-                        compact_t[s] = (
-                            f"thr={info['threshold']:.2f} R={info['recall']:.3f} "
-                            f"FPR={info['fpr']:.3f} [R<0.98]"
-                        )
-                    elif info.get("status") == "single_class_no_recall":
-                        thr = info.get("threshold")
-                        fpr = info.get("fpr")
-                        compact_t[s] = (
-                            f"thr={thr:.2f} FPR={fpr:.3f} [single_class]"
-                            if thr is not None and fpr is not None
-                            else "[single_class]"
-                        )
-                    else:
-                        compact_t[s] = (
-                            f"[{info.get('status', 'skipped')}, n={info.get('n', 0)}]"
-                        )
-                print(
-                    "[test] per_source threshold (recall>=0.98, min FPR):",
-                    compact_t,
-                )
-            try:
-                seq = compute_sequence_alarm_summary(
-                    test_df,
-                    ty,
-                    tp,
-                    prob_threshold_high=float(best_thr),
-                    prob_threshold_low=None,
-                )
-                video_event_metrics = sanitize_for_json(seq) if seq is not None else None
-                if video_event_metrics is not None and not video_event_metrics.get("skipped"):
-                    print(
-                        f"[eval] seq alarm: FA_events={video_event_metrics.get('false_alarm_event_count')} "
-                        f"missed={video_event_metrics.get('missed_fire_event_count')} "
-                        f"lat_mean={video_event_metrics.get('detection_latency_frames_mean')}"
-                    )
-                elif isinstance(video_event_metrics, dict) and video_event_metrics.get("skipped"):
-                    print(f"[eval] seq alarm skipped: {video_event_metrics.get('reason')}")
-            except Exception as e:
-                print(f"[eval] seq alarm skipped: {type(e).__name__}: {e}")
-                video_event_metrics = {"skipped": True, "reason": str(e)}
+            def _metric_pack(m: dict) -> dict:
+                return sanitize_for_json({k: v for k, v in m.items()})
 
-            val_real_pack = sanitize_for_json(val_protocol_raw) if val_protocol_raw else {}
-            tr_real_pack = sanitize_for_json(test_realistic_raw) if test_realistic_raw else {}
-            tstress_pack = sanitize_for_json(test_stress_raw) if test_stress_raw else {}
+            val_real_pack = _metric_pack(vm)
+            tr_real_pack = _metric_pack(tm)
+            ta_save = {
+                "epochs": int(epochs),
+                "batch_size": int(bs),
+                "lr": float(lr),
+                "loss_mode": str(loss_mode),
+                "loss_name": str(ln),
+                "scheduler_kind": str(scheduler_kind),
+                "grad_accum_steps": int(grad_accum_steps),
+                "no_fire_weight": float(nw),
+                "fire_weight": float(fw),
+                "training_class_balance": training_class_balance,
+                "selection_metric": str(sel_norm),
+                "thermal_init": str(thermal_init),
+                "freeze_rgb_epochs": int(frz_rgb),
+                "thermal_lr_mult": float(thermal_lr_mult),
+                "modal_dropout_p": float(modal_dropout_p),
+                "thermal_norm": str(thermal_norm),
+                "thermal_mu": float(thermal_mu_es) if thermal_mu_es is not None else None,
+                "thermal_sigma": float(thermal_sig_es) if thermal_sig_es is not None else None,
+                "rgb_aug_intensity": float(rgb_aug_intensity),
+                "thermal_aug_intensity": float(thermal_aug_intensity),
+                "gate_entropy_weight": float(gate_entropy_weight),
+                "gate_min_thermal_floor": float(gate_min_thermal_floor),
+                "gate_min_thermal_weight": float(gate_min_thermal_weight),
+                "gate_balance_weight": float(gate_balance_weight),
+                "backbone": str(backbone),
+            }
 
             torch.save(
                 {
@@ -1468,38 +1205,8 @@ def train_one_run(
                     "backbone": backbone,
                     "input_size": int(size),
                     "class_mapping": {"0": "no_fire", "1": "fire"},
-                    "training_args": {
-                        "epochs": int(epochs),
-                        "batch_size": int(bs),
-                        "lr": float(lr),
-                        "loss_mode": str(loss_mode),
-                        "loss_name": str(ln),
-                        "scheduler_kind": str(scheduler_kind),
-                        "grad_accum_steps": int(grad_accum_steps),
-                        "no_fire_weight": float(nw),
-                        "fire_weight": float(fw),
-                        "training_class_balance": training_class_balance,
-                        "selection_metric": str(sel_norm),
-                        "thermal_init": str(thermal_init),
-                        "freeze_rgb_epochs": int(frz_rgb),
-                        "thermal_lr_mult": float(thermal_lr_mult),
-                        "modal_dropout_p": float(modal_dropout_p),
-                        "thermal_norm": str(thermal_norm),
-                        "thermal_mu": (
-                            float(thermal_mu_es) if thermal_mu_es is not None else None
-                        ),
-                        "thermal_sigma": (
-                            float(thermal_sig_es) if thermal_sig_es is not None else None
-                        ),
-                        "rgb_aug_intensity": float(rgb_aug_intensity),
-                        "thermal_aug_intensity": float(thermal_aug_intensity),
-                        "gate_entropy_weight": float(gate_entropy_weight),
-                        "gate_min_thermal_floor": float(gate_min_thermal_floor),
-                        "gate_min_thermal_weight": float(gate_min_thermal_weight),
-                        "gate_balance_weight": float(gate_balance_weight),
-                    },
+                    "training_args": ta_save,
                     "state": model.state_dict(),
-                    # Default inference threshold (operating point) and analysis threshold (F1-optimal)
                     "threshold": float(best_thr),
                     "threshold_f1": float(thr_f1),
                     "threshold_recommended": float(thr_oper),
@@ -1515,16 +1222,8 @@ def train_one_run(
                     "val_best_recall_fpr_key": (
                         list(best_recall_fpr_key) if best_recall_fpr_key is not None else None
                     ),
-                    "val_best_protocol_balanced_key": (
-                        list(best_protocol_key)
-                        if best_protocol_key is not None
-                        else ([float(x) for x in best_proto_fallback_key] if best_proto_fallback_key is not None else None)
-                    ),
                     "temperature": float(T),
-                    "worst_source_by_fpr": worst_source_by_fpr,
-                    "worst_source_by_recall": worst_source_by_recall,
-                    "val_per_source_thresholds": sanitize_for_json(src_thr_recs),
-                    "test_per_source_thresholds": sanitize_for_json(test_src_thr_recs),
+                    "eval_protocol_corruption": f"{corr_name}@{corr_sev}",
                     "saved_at_utc": datetime.now(timezone.utc).isoformat(),
                 },
                 out_ckpt,
@@ -1533,11 +1232,6 @@ def train_one_run(
                 f"Saved (best sel={sel_norm} selection_score={selection_score:.4f}, "
                 f"f1+balacc_legacy={score_legacy:.4f}, realistic={score_realistic:.4f}, T={T:.3f}): {out_ckpt}"
             )
-            if worst_source_by_fpr or worst_source_by_recall:
-                print(
-                    f"[val] worst_source_by_fpr={worst_source_by_fpr} "
-                    f"worst_source_by_recall={worst_source_by_recall}"
-                )
             extra_info = {}
             if extra_test_loader is not None:
                 extra_info = {
@@ -1549,83 +1243,20 @@ def train_one_run(
             metrics = {
                 "mode": mode,
                 "model_family": mf,
-                "thermal_norm": str(thermal_norm),
-                "thermal_mu": float(thermal_mu_es) if thermal_mu_es is not None else None,
-                "thermal_sigma": (
-                    float(thermal_sig_es) if thermal_sig_es is not None else None
-                ),
                 "epoch": ep,
+                "training_args": ta_save,
                 "threshold": float(best_thr),
-                "threshold_alarm": float(thr_alarm),
-                "threshold_alarm_raw": float(thr_alarm_raw),
-                "threshold_alarm_clamped": float(thr_alarm),
-                "threshold_alarm_min": float(THRESHOLD_ALARM_MIN),
-                "threshold_review": float(thr_review),
                 "temperature": float(T),
-                "ece_val": float(ece),
-                "brier_val": float(brier),
-                "reliability_val": reliability_report(vy, vp, n_bins=10),
+                "eval_protocol_corruption": f"{corr_name}@{corr_sev}",
                 "val_score_f1_balacc": float(score_legacy),
                 "val_score_realistic": float(score_realistic),
                 "val_selection_score": float(selection_score),
                 "selection_metric": str(sel_norm),
-                "training_class_balance": training_class_balance,
-                "val_per_source": per_source,
-                "val_per_source_thresholds": src_thr_recs,
-                "test_per_source": test_per_source,
-                "test_per_source_thresholds": test_src_thr_recs,
-                "gap_metrics": {
-                    "fpr_gap": (
-                        float(vm.get("false_positive_rate", float("nan")))
-                        - float(tm.get("false_positive_rate", float("nan")))
-                    ),
-                    "recall_gap": (
-                        float(vm.get("recall", float("nan")))
-                        - float(tm.get("recall", float("nan")))
-                    ),
-                    "f1_gap": (
-                        float(vm.get("f1", float("nan")))
-                        - float(tm.get("f1", float("nan")))
-                    ),
-                    "bal_acc_gap": (
-                        float(vm.get("bal_acc", float("nan")))
-                        - float(tm.get("bal_acc", float("nan")))
-                    ),
-                    "ece_gap": float(ece),  # val ECE; test ECE captured per-source
-                },
-                "threshold_policies": threshold_policies,
-                "threshold_policy_csv": threshold_policy_csv or None,
-                "video_event_metrics": video_event_metrics if video_event_metrics is not None else {},
-                "worst_source_by_fpr": worst_source_by_fpr,
-                "worst_source_by_recall": worst_source_by_recall,
-                "eval_protocol_notes": (
-                    "val_clean/test_clean: laboratory-style held-out split (threshold tuned on clean "
-                    "validation). val_realistic/test_realistic: mean over gauss_noise_rgb and "
-                    "gaussian_blur @ severity 1 (drone/camera-realistic RGB noise + blur at eval time only). "
-                    "test_stress: mean over gauss_noise_rgb, brightness_contrast, gaussian_blur @ severity 2 plus "
-                    "thermal_shift @ severity 1 (heavier degradation; weaker influence on checkpoint "
-                    "selection than clean/realistic blocks)."
-                ),
-                "val_clean": {
-                    k: (float(v) if not isinstance(v, np.ndarray) else v.tolist())
-                    for k, v in vm.items()
-                },
-                "val": {
-                    k: (float(v) if not isinstance(v, np.ndarray) else v.tolist())
-                    for k, v in vm.items()
-                },
                 "val_realistic": val_real_pack,
-                "test_clean": {
-                    k: (float(v) if not isinstance(v, np.ndarray) else v.tolist())
-                    for k, v in tm.items()
-                },
-                "test": {
-                    k: (float(v) if not isinstance(v, np.ndarray) else v.tolist())
-                    for k, v in tm.items()
-                },
                 "test_realistic": tr_real_pack,
+                "val": val_real_pack,
+                "test": tr_real_pack,
                 "test_noisy": tr_real_pack,
-                "test_stress": tstress_pack,
                 **extra_info,
             }
             metrics_path = Path(OUTPUTS_DIR) / f"metrics_{mode}_{mf}.json"
@@ -1690,14 +1321,8 @@ def train_one_run(
             f"alarm_clamped={ck.get('threshold_alarm_clamped')} "
             f"review={ck.get('threshold_review')}"
         )
-        ws_fpr = ck.get("worst_source_by_fpr")
-        ws_rec = ck.get("worst_source_by_recall")
-        if ws_fpr or ws_rec:
-            print(
-                f"[calibrate] worst_source_by_fpr={ws_fpr} worst_source_by_recall={ws_rec}"
-            )
 
-    # Final report: compare fixed thresholds on val/test using the best checkpoint.
+    # Final report: fixed thresholds under eval-time protocol corruption only.
     try:
         if Path(out_ckpt).exists():
             try:
@@ -1707,10 +1332,29 @@ def train_one_run(
             model.load_state_dict(ck["state"])
             model.eval()
             T_best = float(ck.get("temperature", 1.0))
-            fixed = [0.50, 0.55]
-            vy2, vp2 = eval_probs(model, val_loader, device, temperature=T_best)
-            ty2, tp2 = eval_probs(model, test_loader, device, temperature=T_best)
-            print("[final] threshold comparison (val/test):")
+            cn, cs = protocol_corruption(mode)
+            fin_seed = 900_001
+            vy2, lg2 = eval_logits_corrupted(
+                model,
+                val_loader,
+                device,
+                corruption_name=cn,
+                severity=cs,
+                seed=fin_seed,
+                max_batches=None,
+            )
+            ty2, lt2 = eval_logits_corrupted(
+                model,
+                test_loader,
+                device,
+                corruption_name=cn,
+                severity=cs,
+                seed=fin_seed + 7,
+                max_batches=None,
+            )
+            vp2 = _probs_from_logits(lg2, temperature=T_best)
+            tp2 = _probs_from_logits(lt2, temperature=T_best)
+            print(f"[final] threshold comparison (val/test, {cn}@{cs}):")
             for t in fixed:
                 mv = metrics_at_threshold(vy2, vp2, float(t))
                 mt = metrics_at_threshold(ty2, tp2, float(t))
@@ -1766,54 +1410,18 @@ def train_one_run(
                                 float(v0) if not isinstance(v0, (list, dict)) else json.dumps(v0)
                             )
 
-                vc = lastm.get("val_clean") if isinstance(lastm.get("val_clean"), dict) else lastm.get("val")
-                _prot_fpr_triple(vc if isinstance(vc, dict) else None, row, "val_clean")
-                _prot_fpr_triple(lastm.get("val_realistic"), row, "val_realistic")
-
-                tstc = (
-                    lastm.get("test_clean")
-                    if isinstance(lastm.get("test_clean"), dict)
-                    else lastm.get("test")
-                )
-                _prot_fpr_triple(tstc if isinstance(tstc, dict) else None, row, "test_clean")
-                tr_bundle = (
+                vr = lastm.get("val_realistic")
+                if not isinstance(vr, dict):
+                    vr = lastm.get("val")
+                _prot_fpr_triple(vr if isinstance(vr, dict) else None, row, "val_realistic")
+                trb = (
                     lastm.get("test_realistic")
                     if isinstance(lastm.get("test_realistic"), dict)
                     else lastm.get("test_noisy")
                 )
-                _prot_fpr_triple(tr_bundle if isinstance(tr_bundle, dict) else None, row, "test_realistic")
-                _prot_fpr_triple(lastm.get("test_stress"), row, "test_stress")
-
-                # Back-compat alias: test_noisy_* mirrors test_realistic_* (subset).
-                for short in ("f1", "recall", "fpr"):
-                    tk = f"test_realistic_{short}"
-                    if tk in row:
-                        row[f"test_noisy_{short}"] = row[tk]
-
-                for split in ("val", "test"):
-                    if isinstance(lastm.get(split), dict):
-                        p = lastm[split]
-                        for k in (
-                            "acc",
-                            "bal_acc",
-                            "precision",
-                            "recall",
-                            "f1",
-                            "specificity",
-                            "false_positive_rate",
-                            "auc",
-                            "ap",
-                        ):
-                            if k in p:
-                                val = p[k]
-                                row[f"{split}_{k}"] = float(val) if not isinstance(val, (list, dict)) else json.dumps(val)
-                        if "cm" in p:
-                            row[f"{split}_cm"] = json.dumps(sanitize_for_json(p["cm"]))
-                row["threshold_saved"] = float(lastm.get("threshold", float("nan")))
-                row["worst_source_fpr"] = lastm.get("worst_source_by_fpr")
-                row["worst_source_recall"] = lastm.get("worst_source_by_recall")
-                row["val_ece"] = lastm.get("ece_val")
-                row["val_brier"] = lastm.get("brier_val")
+                if not isinstance(trb, dict):
+                    trb = lastm.get("test")
+                _prot_fpr_triple(trb if isinstance(trb, dict) else None, row, "test_realistic")
             append_experiment_csv_row(str(experiment_log_csv), row)
             print(f"[train] experiment log -> {experiment_log_csv}")
         except Exception as ex:
