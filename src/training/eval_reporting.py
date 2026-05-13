@@ -271,6 +271,8 @@ def sanitize_for_json(obj: Any) -> Any:
         if math.isnan(x) or math.isinf(x):
             return None
         return x
+    if isinstance(obj, np.ndarray):
+        return sanitize_for_json(obj.tolist())
     if isinstance(obj, dict):
         return {k: sanitize_for_json(v) for k, v in obj.items()}
     if isinstance(obj, list):
