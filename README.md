@@ -63,7 +63,7 @@ python scripts/run_kaggle_full_suite.py \
   --epochs 25 --patience 5 --bs 8 --lr 2e-5
 ```
 
-- Tamamlanan `experiment_name` tekrar **çalıştırılmaz** (`improve_results.csv` içinde geçerli `test_recall` varsa atlanır).
+- Tamamlanan `experiment_name` tekrar **çalıştırılmaz** (`improve_results.csv` içinde geçerli `test_realistic_recall` varsa atlanır; eski loglarda `test_recall` kullanılmış olabilir).
 - Hatalı adımlar **`/kaggle/working/logs/failed_runs.csv`** içine yazılır; sıra bir sonraki deneyle devam eder.
 - Her dual‑branch eğitiminden sonra **`models/by_experiment/{slug}.pt`** arşibi yazılır (üzerine yazılan `dual_branch.pt` ile metrik uyumu için).
 - Robustness/ablation çıktıları `outputs/kaggle_eval_archive/` altında saklanır; son çalıştırma **`outputs/robustness_eval.csv`** ve **`outputs/ablation_suite.csv`** ile güncellenir.
@@ -83,12 +83,10 @@ python scripts/run_priority_experiment_suite.py --dry_run \
 | Bayrak | Açıklama |
 |--------|-----------|
 | `--model_family` | `early_fusion`, `dual_branch_fusion`, `dual_branch_gated_fusion`, `dual_branch_attention_fusion`, `dual_branch_mid_fusion` |
-| `--selection_metric` | `protocol_balanced` (varsayılan; clean val/test + realistic eval bantları; stress hafif), `f1_balacc`, `realistic`, `recall_fpr` |
+| `--selection_metric` | `realistic` (varsayılan; protocol-noisy val üzerinden bileşik), `f1_balacc`, `recall_fpr` |
 | `--thermal_norm` | `percentile`, `minmax`, `uint16_div`, `train_zscore` |
 | `--modal_dropout_p` | Füzyon modalite dropout olasılığı |
 | `--thermal_lr_mult`, `--freeze_rgb_epochs` | Dual-branch ısıtma politikası |
-| `--experiment_log_csv` / `--experiment_name` | `outputs/improve_results.csv` satır günlüğü |
-
 ## Video çıkarımı
 
 ```powershell
@@ -128,9 +126,9 @@ Kaggle’da yolları `/kaggle/working/outputs/...` ve `/kaggle/working/models/..
 
 - **Sınıf dengesi:** `--loss_mode balanced_sampler` + `WeightedRandomSampler`; `cb_focal` vb.
 - **Bölme & sızıntı:** `split_group`; `flame_video_nofire` pair politikası README’deki özetle uyumlu. İndeks değişiminden sonra `scripts/check_leakage.py`.
-- **Source-aware eşik:** Trainer val/test için kaynak bazlı eşik taraması ve JSON/checkpoint içi meta.
+- **Kaynak-duyarlı eşik taraması** ve benzeri ağır diagnostics **JSON/metrics** çıktısından kaldırıldı (operasyonel protokole odaklı sade çıktı).
 - **Augmentation:** Yalnızca **train** loader’da (RGB jitter/blur/erase; termal fotoğrafik + random patch). **Train’de** termal tensöre **Gaussian additive noise uygulanmaz** (temiz öğrenme yüzeyi). RGB dalı için `--rgb_aug_intensity` varsayılanı **1.15** (hafif güçlendirilmiş RGB invariance; checkpoint’teki fusion/thermal ayarları ve modal dropout aynı şekilde korunur).
-- **Eval protokolü (yalnızca metrik çıkarımında):** metrics / `improve_results` artık **val_clean**, **val_realistic** (gauss_noise_rgb + Gauss blur @ sev1 ortalaması), **test_clean**, **test_realistic** (aynı sev1), **test_stress** (`gauss_noise_rgb` + parlaklık-kontrast + blur @ sev2 + `thermal_shift` @ sev1 ortalaması) içerir; eğitim ve canlı inference’a uygulanmaz. Eski alanlar uyumluluk için: `val`=val_clean, `test`=test_clean, `test_noisy`=test_realistic. **Gaussian gürültü — sadece offline test:** `robustness_eval.py` varsayılan **`--severities 1`** (stres için `1,2,3`). `ablation_eval` sabit σ koşulları yalnızca forward’da.
+- **Eval protokolü:** Doğrulama ve test metrikleri yalnızca **tek operasyonel bant**: RGB/fusion için `gauss_noise_rgb`, thermal için `gauss_noise_thermal`, **severity 1**, yalnızca **eval forward**. `metrics_*.json` ve `improve_results.csv`: `val_realistic_*`, `test_realistic_*` (F1, recall, FPR). Geriye uyum: JSON’da `val` / `test` / `test_noisy` anahtarları aynı operasyonel sözlüğü gösterir. **Laboratuvar clean** (`val_clean`, `test_clean`) ve **`test_stress` paketi** kaldırıldı. Daha geniş bozunma izi için: `python -m src.eval.robustness_eval --legacy-grid` (clean + corruption×severity grid).
 
 ## Robustness CLI (offline)
 

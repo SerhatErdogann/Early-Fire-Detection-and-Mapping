@@ -2,11 +2,13 @@
 """Summarise experiment grid results and optionally copy checkpoints.
 
 Reads ``outputs/improve_results.csv`` (typically produced on Kaggle) and writes
-``best_model_report.md`` with **three complementary picks** — not a single winner:
+``best_model_report.md`` with three complementary picks — not a single winner:
 
-- **best_recall_model** — maximise test recall (secondary: lower FPR, higher composite score).
-- **best_low_false_alarm_model** — lowest test FPR among runs meeting ``test_recall >= min_recall``.
-- **best_balanced_model** — highest **protocol-balanced** score when eval columns exist (clean val/test + realistic test + stress margin); otherwise deployment composite from clean test.
+- **best_recall_model** — maximise test recall on **protocol-realistic test** metrics.
+- **best_low_false_alarm_model** — lowest test FPR among runs meeting realistic recall gate.
+- **best_balanced_model** — blends val/test realistic F1 (deployment-friendly balance).
+
+Operational scoring uses noisy-test columns only (:func:`operational_score_from_improve_realistic_row`).
 
 If ``--copy_balanced_ckpt`` (default ``best_model.pt``), the balanced pick is copied.
 When the CSV is missing (local-only dev machine), exits **0** and writes a short stub Markdown.
@@ -25,7 +27,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.training.eval_reporting import operational_score_from_test_row, protocol_score_from_improve_row
+from src.training.eval_reporting import (
+    balanced_realistic_rank_score,
+    operational_score_from_improve_realistic_row,
+)
 
 
 def _flt_cell(row: pd.Series | dict, key: str) -> float:
@@ -39,13 +44,10 @@ def _flt_cell(row: pd.Series | dict, key: str) -> float:
 
 
 def _protocol_metrics_table(row: pd.Series) -> str:
-    """Markdown table: F1 / recall / FPR for five eval protocol rows (+ notes)."""
+    """Markdown table for operational eval rows only."""
     spec = [
-        ("Clean validation (laboratory-held-out)", "val_clean"),
-        ("Realistic validation (drone/camera-style corruptions @ eval)", "val_realistic"),
-        ("Clean test", "test_clean"),
-        ("Realistic test", "test_realistic"),
-        ("Stress test (heavier corruptions; coarse margin check)", "test_stress"),
+        ("Validation (protocol noise @ eval)", "val_realistic"),
+        ("Test (protocol noise @ eval)", "test_realistic"),
     ]
     lines = [
         "| Protocol | F1 | Recall | FPR |",
@@ -58,12 +60,10 @@ def _protocol_metrics_table(row: pd.Series) -> str:
         )
     lines.append("")
     lines.append(
-        "_Interpretation: **clean** = no input corruptions (standard split). "
-        "**realistic** = mean over `gauss_noise_rgb` and `gaussian_blur` at severity 1 "
-        "(forward-time only; not used in training/inference). "
-        "**stress** = gauss_noise_rgb, brightness_contrast, gaussian_blur @ severity 2 plus "
-        "`thermal_shift` @ severity 1; "
-        "reported for engineering visibility and only weakly weighted in checkpoint picks._\n"
+        "_Operational protocol:_ mild Gaussian corruption on RGB (fusion/RGB checkpoints) "
+        "or thermal (thermal-only) at severity **1**, applied **only** at eval forward "
+        "(not training). Offline sweeps may use ``robustness_eval.py --legacy-grid`` "
+        "for wider corruption grids.\n"
     )
     return "\n".join(lines)
 
@@ -104,23 +104,13 @@ def _format_pick(title: str, row: pd.Series, *, ckpt_hint: Path | None) -> list[
         f"### {title}\n\n",
         f"- **experiment_name**: `{row.get('experiment_name', '')}`\n",
         f"- **model_family**: `{row.get('model_family', '')}`\n",
-        f"- **test recall / FPR / bal_acc / F1**: {_flt(row.get('test_recall')):.4f} / "
-        f"{_flt(row.get('test_false_positive_rate')):.4f} / {_flt(row.get('test_bal_acc')):.4f} / "
-        f"{_flt(row.get('test_f1')):.4f}\n",
+        f"- **test_realistic** recall / FPR / F1: {_flt(row.get('test_realistic_recall')):.4f} / "
+        f"{_flt(row.get('test_realistic_fpr')):.4f} / {_flt(row.get('test_realistic_f1')):.4f}\n",
     ]
-    lines += [
-        "\n",
-        _protocol_metrics_table(row),
-        "\n",
-        f"- **deployment composite (legacy clean test + ECE/Brier)**: {operational_score_from_test_row(_row_series_to_dict(row)):.4f}\n",
-    ]
-    proto_v = None
-    try:
-        proto_v = protocol_score_from_improve_row(_row_series_to_dict(row))
-        if proto_v == proto_v:
-            lines.append(f"- **protocol-balanced score (trainer selection proxy)**: {proto_v:.4f}\n")
-    except Exception:
-        pass
+    lines += ["\n", _protocol_metrics_table(row), "\n"]
+    osc = operational_score_from_improve_realistic_row(_row_series_to_dict(row))
+    if osc == osc:
+        lines.append(f"- **deployment composite (noisy test + default calib prior)**: {osc:.4f}\n")
     lines += [
         f"- **checkpoint path**: `{row.get('out_ckpt', '')}`\n",
     ]
@@ -135,7 +125,7 @@ def _format_pick(title: str, row: pd.Series, *, ckpt_hint: Path | None) -> list[
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--results_csv", default="outputs/improve_results.csv")
-    ap.add_argument("--min_recall", type=float, default=0.98, help="Gate for low-FPR bucket.")
+    ap.add_argument("--min_recall", type=float, default=0.98, help="Gate for low-FPR bucket (realistic test).")
     ap.add_argument("--baseline_family", default="dual_branch_fusion")
     ap.add_argument(
         "--copy_balanced_ckpt",
@@ -182,11 +172,19 @@ def main() -> int:
     if "suite_audit" in df.columns:
         m = pd.to_numeric(df["suite_audit"], errors="coerce").fillna(0).astype(int) == 0
         df = df.loc[m].copy()
-    req = ["test_recall", "test_false_positive_rate", "test_bal_acc", "test_f1"]
+    req = [
+        "test_realistic_recall",
+        "test_realistic_fpr",
+        "test_realistic_f1",
+        "val_realistic_f1",
+    ]
     miss = [c for c in req if c not in df.columns]
     if miss:
         print(f"[select_best] Missing columns {miss}; abort.")
-        md_path.write_text("# best_model_report\n\n_Missing CSV columns — train must log test metrics._\n", encoding="utf-8")
+        md_path.write_text(
+            "# best_model_report\n\n_Missing CSV columns — train must log protocol-realistic metrics._\n",
+            encoding="utf-8",
+        )
         return 3
 
     for c in req:
@@ -213,43 +211,35 @@ def main() -> int:
         print("[select_best] Empty frame after filtering")
         return 0
 
-    df["_opscore"] = df.apply(lambda r: operational_score_from_test_row(r.to_dict()), axis=1)
-    proto_ready = (
-        ("val_clean_f1" in df.columns)
-        and ("test_clean_f1" in df.columns)
-        and ("test_realistic_f1" in df.columns)
-    )
-    if proto_ready:
-        df["_bal_core"] = df.apply(lambda r: protocol_score_from_improve_row(r.to_dict()), axis=1)
-    else:
-        df["_bal_core"] = df["_opscore"]
+    df["_opscore"] = df.apply(lambda r: operational_score_from_improve_realistic_row(r.to_dict()), axis=1)
+    df["_bal_core"] = df.apply(lambda r: balanced_realistic_rank_score(r.to_dict()), axis=1)
 
     best_recall = df.sort_values(
-        by=["test_recall", "test_false_positive_rate", "_opscore"],
+        by=["test_realistic_recall", "test_realistic_fpr", "_opscore"],
         ascending=[False, True, False],
     ).iloc[0]
 
-    hi = df[df["test_recall"] >= float(args.min_recall)].copy()
+    hi = df[df["test_realistic_recall"] >= float(args.min_recall)].copy()
     if len(hi) == 0:
         hi = df.copy()
         low_fpr_note = (
-            f"**Uyarı**: hiçbir satır ``test_recall>={float(args.min_recall):.3f}`` değildi; "
+            f"**Uyarı**: hiçbir satır ``test_realistic_recall>={float(args.min_recall):.3f}`` değildi; "
             "_en düşük yanlış alarm_ modeli tüm küme üzerinden seçildi.\n\n"
         )
     else:
         low_fpr_note = (
-            f"**best_low_false_alarm_model** seçimi için önce ``test_recall>={float(args.min_recall):.3f}`` "
+            f"**best_low_false_alarm_model** seçimi için önce ``test_realistic_recall>={float(args.min_recall):.3f}`` "
             f"olan **{len(hi)}** deney filtrelendi.\n\n"
         )
 
     best_low_fp = hi.sort_values(
-        by=["test_false_positive_rate", "test_recall", "_opscore"],
+        by=["test_realistic_fpr", "test_realistic_recall", "_opscore"],
         ascending=[True, False, False],
     ).iloc[0]
 
     cand_balanced = hi.copy() if len(hi) else df.copy()
     best_balanced = cand_balanced.sort_values(
-        by=["_bal_core", "_opscore", "test_recall"],
+        by=["_bal_core", "_opscore", "test_realistic_recall"],
         ascending=[False, False, False],
     ).iloc[0]
 
@@ -266,40 +256,40 @@ def main() -> int:
         print(f"[select_best] Copied balanced checkpoint → {out_dest}")
     elif out_dest is not None:
         copy_note = f"_Balanced checkpoint kopyalanamadı (`{out_dest}`) — yerel dosya yok._\n\n"
-        print(f"[select_best] Skipped ckpt copy (resolved path missing)")
+        print("[select_best] Skipped ckpt copy (resolved path missing)")
     else:
         copy_note = ""
 
     baseline_mask = df["model_family"].astype(str) == str(args.baseline_family)
-    base = df[baseline_mask].sort_values(by="test_recall", ascending=False).iloc[0] if baseline_mask.any() else df.iloc[0]
+    base = (
+        df[baseline_mask].sort_values(by="test_realistic_recall", ascending=False).iloc[0]
+        if baseline_mask.any()
+        else df.iloc[0]
+    )
 
     lines = ["# Experiment grid — üç model seçimi\n\n"]
     lines.append(
-        "**Değerlendirme protokolü.** _Clean validation / clean test_: laboratuvar tipi tutulmuş doğrulama ve test "
-        "(eşik bu temiz doğrulamadan seçilir). _Realistic val/test_: görülen bozulmaların tek başına güçlendirilmesi "
-        "(yalnızca metrik çıkarımında; Streamlit/canlı çıkarım yok); drone/kameraya daha yakın koşula karşılık gelir. "
-        "_Stress test_: daha ağır bozulma bandı — raporda yer alır ve checkpoint seçimini yalnızca dolaylı/çok düşük "
-        "ağırlıkla etkiler.\n\n"
+        "**Değerlendirme protokolü.** Tüm raporlanan F1 / recall / FPR değerleri **operasyonel** "
+        "değerlendirmedir: tek tip hafif Gaussian gürültü (RGB veya termal, severity 1, yalnızca eval forward). "
+        "Laboratuvar tipi **clean** bantları ve ayrı **stress** paketi kaldırılmıştır.\n\n"
     )
     lines.append(
-        "Tasarım hedefi **gerçek kullanımda güvenilir yangın uyarısı**dır (yüksek yakalama + düşük yanlış alarm + "
-        "yüksek ayırıcı metrikler; mümkünse düşük ECE/Brier). Aynı satır her üç başlıkta da kazanmak zorunda değildir.\n\n"
+        "Tasarım hedefi **gerçek kullanımda güvenilir yangın uyarısı**dır (yüksek yakalama + düşük yanlış alarm). "
+        "Aynı satır her üç başlıkta da kazanmak zorunda değildir.\n\n"
     )
     lines.append(low_fpr_note)
     lines.append(copy_note)
 
     lines.extend(_format_pick("best_recall_model", best_recall, ckpt_hint=ck_recall))
     lines.extend(_format_pick("best_low_false_alarm_model", best_low_fp, ckpt_hint=ck_lf))
-    lines.extend(_format_pick("best_balanced_model (deployment composite)", best_balanced, ckpt_hint=ck_bal))
+    lines.extend(_format_pick("best_balanced_model (realistic val/test F1 blend)", best_balanced, ckpt_hint=ck_bal))
 
     lines.append("## Baseline karşılaştırma (referans)\n\n")
     lines.append(f"- **baseline row** (`model_family={args.baseline_family!r}`): `{base.get('experiment_name', '')}`\n")
     lines.append(
-        f"  - test R / FPR: {float(base.get('test_recall', 0)):.4f} / {float(base.get('test_false_positive_rate', 0)):.4f}\n"
+        f"  - test_realistic R / FPR: {float(base.get('test_realistic_recall', 0)):.4f} / "
+        f"{float(base.get('test_realistic_fpr', 0)):.4f}\n"
     )
-    lines.append("\n## Zayıf kaynaklar (balanced satırından)\n\n")
-    lines.append(f"- **worst_source_fpr**: `{best_balanced.get('worst_source_fpr', '')}`\n")
-    lines.append(f"- **worst_source_recall**: `{best_balanced.get('worst_source_recall', '')}`\n")
     lines.append("\n_Raporu Kaggle `improve_results.csv` dolduktan sonra yeniden üretin._\n")
 
     md_path.write_text("".join(lines), encoding="utf-8")

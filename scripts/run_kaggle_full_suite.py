@@ -4,7 +4,7 @@
 Features
 --------
 - Skip runs whose ``experiment_name`` already exists in ``improve_results.csv`` with a
-  numeric ``test_recall`` (restart-safe).
+  numeric ``test_realistic_recall`` (restart-safe; legacy rows may still expose ``test_recall``).
 - After each successful train: copy checkpoint to ``models/by_experiment/{slug}.pt``
   so ``select_best_and_report.py`` can pick the *correct* weights (canonical
   ``dual_branch.pt`` / ``fusion.pt`` are overwritten each run).
@@ -80,7 +80,14 @@ def _is_experiment_completed(improve_csv: Path, experiment_name: str) -> bool:
     if not mask.any():
         return False
     sub = df.loc[mask]
-    tr = pd.to_numeric(sub.get("test_recall", float("nan")), errors="coerce")
+    col = (
+        "test_realistic_recall"
+        if "test_realistic_recall" in sub.columns
+        else ("test_recall" if "test_recall" in sub.columns else None)
+    )
+    if col is None:
+        return False
+    tr = pd.to_numeric(sub.get(col, float("nan")), errors="coerce")
     return bool(tr.notna().any())
 
 

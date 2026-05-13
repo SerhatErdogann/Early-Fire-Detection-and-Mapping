@@ -143,13 +143,20 @@ df = pd.read_csv(csv_path)
 if "suite_audit" in df.columns:
     df = df[pd.to_numeric(df["suite_audit"], errors="coerce").fillna(0).astype(int) == 0]
 
-cols = ["experiment_name", "model_family", "test_recall", "test_false_positive_rate", "test_bal_acc", "test_f1"]
+cols = [
+    "experiment_name",
+    "model_family",
+    "test_realistic_recall",
+    "test_realistic_fpr",
+    "test_realistic_f1",
+    "val_realistic_f1",
+]
 cols = [c for c in cols if c in df.columns]
 
 if cols:
     best10 = df.sort_values(
-        by=["test_recall", "test_false_positive_rate", "test_bal_acc", "test_f1"],
-        ascending=[False, True, False, False],
+        by=["test_realistic_recall", "test_realistic_fpr", "test_realistic_f1"],
+        ascending=[False, True, False],
         na_position="last",
     ).head(10)
     display(best10[cols])
