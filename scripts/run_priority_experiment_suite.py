@@ -27,7 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from datetime import datetime, timezone
 
-from src.training.trainer import append_experiment_csv_row, sanitize_for_json
+from src.training.trainer import append_experiment_csv_row
 
 def run_cmd(cmd: list[str], cwd: Path) -> int:
     print("+", " ".join(cmd))
@@ -35,34 +35,43 @@ def run_cmd(cmd: list[str], cwd: Path) -> int:
 
 
 def detect_modality_collapse(csv_path: Path) -> tuple[bool, str]:
-    """Heuristic stress-test diagnostic using the strongest available severity rows."""
+    """Fusion RGB-vs-thermal heuristic from robustness CSV (works with protocol-only grids)."""
     df = pd.read_csv(csv_path) if csv_path.exists() else pd.DataFrame()
     if df.empty:
         return False, "no_robustness_csv"
     try:
-        clean = float(df[(df["corruption"] == "clean")]["recall"].iloc[0])
         rgb_sub = df[df["corruption"] == "gauss_noise_rgb"]
         th_sub = df[df["corruption"] == "gauss_noise_thermal"]
         if len(rgb_sub) == 0 or len(th_sub) == 0:
             return False, "missing_noise_rows"
-        sev_rgb = int(rgb_sub["severity"].max()) if "severity" in rgb_sub.columns else 3
-        sev_th = int(th_sub["severity"].max()) if "severity" in th_sub.columns else 3
-        r_rgb = float(rgb_sub[rgb_sub["severity"] == sev_rgb]["recall"].iloc[0])
-        rt = float(th_sub[th_sub["severity"] == sev_th]["recall"].iloc[0])
+        if "severity" in rgb_sub.columns:
+            sev_rgb = int(rgb_sub["severity"].max())
+            r_rgb = float(rgb_sub[rgb_sub["severity"] == sev_rgb]["recall"].iloc[0])
+        else:
+            r_rgb = float(rgb_sub["recall"].iloc[0])
+        if "severity" in th_sub.columns:
+            sev_th = int(th_sub["severity"].max())
+            rt = float(th_sub[th_sub["severity"] == sev_th]["recall"].iloc[0])
+        else:
+            rt = float(th_sub["recall"].iloc[0])
+        clean_rows = df[df["corruption"] == "clean"]
+        if len(clean_rows) > 0:
+            ref = float(clean_rows["recall"].iloc[0])
+        else:
+            ref = max(float(rt), 0.2)
     except Exception:
         return False, "parse_error"
-    collapse = (float(r_rgb) < 0.05) and (float(rt) > float(clean) * 0.85)
-    reason = ""
+    collapse = (float(r_rgb) < 0.05) and (float(rt) > float(ref) * 0.85)
+    hint = "`--legacy-grid` ile tam grid veya daha yüksek seviye satırları üretin."
     if collapse:
         reason = (
-            "RGB gauss_noise (max sev in CSV) recall ~0 while thermal noise keeps clean-like recall "
-            "(model likely RGB-dominated modality collapse). Re-run robustness with "
-            "`--severities 1,2,3` for the full stress grid."
+            "RGB gauss_noise ile recall çok düşük, thermal gürültü ise referansa yakın "
+            "(olası RGB ağırlıklı modality collapse). " + hint
         )
     else:
         reason = (
-            "No RGB-collapse signature on the strongest available RGB vs thermal noise rows. "
-            "Pass `--severities 1,2,3` for a deeper stress sweep."
+            "Protokol gürültü satırlarında klasik collapse imzası yok. "
+            "Daha ağır seviye veya daha geniş bozunma kümesi için " + hint
         )
     return collapse, reason
 
@@ -96,27 +105,6 @@ def _metrics_flat_for_improve_csv(
         "loss_name": str(ta.get("loss_name", "")),
         "out_ckpt": str(diag_extras.get("out_ckpt_override", "")),
     }
-    for split in ("val", "test"):
-        if isinstance(lastm.get(split), dict):
-            p = lastm[split]
-            for k in (
-                "acc",
-                "bal_acc",
-                "precision",
-                "recall",
-                "f1",
-                "specificity",
-                "false_positive_rate",
-                "auc",
-                "ap",
-            ):
-                if k in p:
-                    val = p[k]
-                    row[f"{split}_{k}"] = (
-                        float(val) if not isinstance(val, (list, dict)) else json.dumps(val)
-                    )
-            if "cm" in p:
-                row[f"{split}_cm"] = json.dumps(sanitize_for_json(p["cm"]))
 
     def _prot_flat(src: dict | None, prefix: str) -> None:
         if not isinstance(src, dict):
@@ -133,28 +121,12 @@ def _metrics_flat_for_improve_csv(
                     float(v0) if not isinstance(v0, (list, dict)) else json.dumps(v0)
                 )
 
-    vc = lastm.get("val_clean") if isinstance(lastm.get("val_clean"), dict) else lastm.get("val")
-    _prot_flat(vc if isinstance(vc, dict) else None, "val_clean")
-    _prot_flat(lastm.get("val_realistic"), "val_realistic")
-    tc = lastm.get("test_clean") if isinstance(lastm.get("test_clean"), dict) else lastm.get("test")
-    _prot_flat(tc if isinstance(tc, dict) else None, "test_clean")
-    trb = (
-        lastm.get("test_realistic")
-        if isinstance(lastm.get("test_realistic"), dict)
-        else lastm.get("test_noisy")
-    )
+    vr = lastm.get("val_realistic") if isinstance(lastm.get("val_realistic"), dict) else lastm.get("val")
+    _prot_flat(vr if isinstance(vr, dict) else None, "val_realistic")
+    trb = lastm.get("test_realistic") if isinstance(lastm.get("test_realistic"), dict) else lastm.get("test_noisy")
+    if not isinstance(trb, dict):
+        trb = lastm.get("test")
     _prot_flat(trb if isinstance(trb, dict) else None, "test_realistic")
-    _prot_flat(lastm.get("test_stress"), "test_stress")
-    for short in ("f1", "recall", "fpr", "auc"):
-        k = f"test_realistic_{short}"
-        if k in row:
-            row[f"test_noisy_{short}"] = row[k]
-
-    row["threshold_saved"] = float(lastm.get("threshold", float("nan")))
-    ws = lastm.get("worst_source_by_fpr")
-    row["worst_source_fpr"] = json.dumps(ws) if isinstance(ws, (dict, list)) else ws
-    wr = lastm.get("worst_source_by_recall")
-    row["worst_source_recall"] = json.dumps(wr) if isinstance(wr, (dict, list)) else wr
     _skip = {"experiment_name_suffix", "out_ckpt_override", "csv_index"}
     row.update({k: v for k, v in diag_extras.items() if k not in _skip})
     return row
