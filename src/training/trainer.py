@@ -1333,6 +1333,7 @@ def train_one_run(
             model.eval()
             T_best = float(ck.get("temperature", 1.0))
             cn, cs = protocol_corruption(mode)
+            fixed = [0.50, 0.55]
             fin_seed = 900_001
             vy2, lg2 = eval_logits_corrupted(
                 model,
