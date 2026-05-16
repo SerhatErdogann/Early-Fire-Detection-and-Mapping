@@ -1,28 +1,57 @@
-# Visual Studio projeye özel ayarlar ve önbellek
-.vs/
-*.user
-*.suo
-
-# Python Önbellek Dosyaları
+.venv/
 __pycache__/
-*.py[cod]
-*$py.class
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# Geçici Çıktı Dosyaları ve Test Verileri
-test_*.txt
-fire_detection_results.txt
+# Jupyter
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
 
-# Sanal Ortam (Virtual Environment)
-venv/
-env/
-.env
+# Logs / temp / debug artifacts
+*.log
+**/logs/
+tmp/
+temp/
+**/tmp/
+**/temp/
+debug_out/
+wandb/
 
-# Modeller (Zaten devasa boyutlarsa GitHub reddeder)
+# Hugging Face / generic caches (local + CI)
+.cache/
+**/.cache/
+.huggingface/
+
+# Data / artifacts (large) — root only, NOT src/data/ (Python modules)
+/data/
+/data.rar
+/outputs/
+
+# Optional UI demo clips — ignore binaries; allow a tracked empty placeholder
+/samples/*
+!/samples/.gitkeep
+
+# Models (can be large) — root models/ folder
+/models/
+*.pt
 *.h5
-*.hdf5
-*.keras
+*.safetensors
 
-# Video Klasörleri / Büyük Görüntü Dosyaları
-*.mp4
-*.avi
-__temp_qgis_imgs/
+# Code archives (we don't ship zipped source in the repo)
+*.zip
+
+# Scratch / local encodes (prefer paths over blanket media ignores)
+scratch_videos/
+upload_temp/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Streamlit (local secrets)
+.streamlit/secrets.toml
