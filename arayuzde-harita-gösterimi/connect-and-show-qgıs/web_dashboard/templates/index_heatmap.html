@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fire Detection Heatmap Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --panel-bg: rgba(30, 41, 59, 0.85);
+            --text-color: #f8fafc;
+            --accent-glow: #ef4444;
+            --border-color: rgba(255, 255, 255, 0.1);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #sidebar {
+            width: 340px;
+            background: var(--panel-bg);
+            backdrop-filter: blur(16px);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            padding: 28px;
+            z-index: 1000;
+            box-shadow: 4px 0 30px rgba(0, 0, 0, 0.6);
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 6px;
+        }
+
+        .logo-dot {
+            width: 14px;
+            height: 14px;
+            background: var(--accent-glow);
+            border-radius: 50%;
+            box-shadow: 0 0 12px var(--accent-glow), 0 0 24px var(--accent-glow);
+            animation: pulse 2s infinite;
+        }
+
+        .logo h1 {
+            font-size: 20px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: #fff;
+        }
+
+        .subtitle {
+            font-size: 13px;
+            color: #94a3b8;
+            margin-bottom: 28px;
+            line-height: 1.6;
+        }
+
+        .stat-card {
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 18px;
+            margin-bottom: 14px;
+            transition: all 0.25s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(255, 255, 255, 0.2);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .stat-title {
+            font-size: 11px;
+            text-transform: uppercase;
+            color: #94a3b8;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        .stat-value {
+            font-size: 30px;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .stat-value.danger {
+            color: #ef4444;
+            text-shadow: 0 0 12px rgba(239, 68, 68, 0.5);
+        }
+
+        /* Legend */
+        .legend {
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 14px;
+        }
+
+        .legend-title {
+            font-size: 11px;
+            text-transform: uppercase;
+            color: #94a3b8;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+        }
+
+        .gradient-bar {
+            height: 14px;
+            border-radius: 7px;
+            background: linear-gradient(to right, #22c55e, #f97316, #ef4444);
+            margin-bottom: 6px;
+        }
+
+        .gradient-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 10px;
+            color: #64748b;
+        }
+
+        /* Map */
+        #map {
+            flex-grow: 1;
+            height: 100%;
+            background: #000;
+        }
+
+        /* Loading */
+        #loader {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-weight: 600;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 14px 28px;
+            border-radius: 30px;
+            z-index: 2000;
+            backdrop-filter: blur(6px);
+            font-size: 14px;
+        }
+
+        @keyframes pulse {
+            0% {
+                transform: scale(0.95);
+                opacity: 0.8;
+            }
+
+            50% {
+                transform: scale(1.15);
+                opacity: 1;
+            }
+
+            100% {
+                transform: scale(0.95);
+                opacity: 0.8;
+            }
+        }
+
+        /* Popup */
+        .leaflet-popup-content-wrapper {
+            background: rgba(15, 23, 42, 0.95);
+            color: #fff;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(12px);
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        }
+
+        .leaflet-popup-tip {
+            background: rgba(15, 23, 42, 0.95);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+
+        .popup-content {
+            text-align: center;
+            min-width: 240px;
+        }
+
+        .popup-content img {
+            width: 100%;
+            border-radius: 8px;
+            border: 1px solid #334155;
+            margin-bottom: 10px;
+        }
+
+        .popup-risk {
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .popup-risk.high {
+            color: #ef4444;
+        }
+
+        .popup-risk.medium {
+            color: #f97316;
+        }
+
+        .popup-risk.low {
+            color: #22c55e;
+        }
+
+        .popup-time {
+            font-size: 12px;
+            color: #94a3b8;
+        }
+
+        .badge {
+            display: inline-block;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 3px 10px;
+            border-radius: 20px;
+            margin-top: 6px;
+        }
+
+        .badge.fire {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
+        .badge.safe {
+            background: rgba(34, 197, 94, 0.2);
+            color: #22c55e;
+            border: 1px solid rgba(34, 197, 94, 0.3);
+        }
+
+        .mode-toggle {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 14px;
+        }
+
+        .mode-btn {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: rgba(15, 23, 42, 0.6);
+            color: #94a3b8;
+            font-family: 'Inter', sans-serif;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            text-align: center;
+            transition: all 0.2s;
+        }
+
+        .mode-btn:hover {
+            border-color: rgba(255, 255, 255, 0.3);
+            color: #fff;
+        }
+
+        .mode-btn.active {
+            background: rgba(239, 68, 68, 0.15);
+            border-color: #ef4444;
+            color: #ef4444;
+        }
+
+        .footer {
+            font-size: 11px;
+            color: #475569;
+            text-align: center;
+            margin-top: auto;
+            padding-top: 16px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="sidebar">
+        <div class="logo">
+            <div class="logo-dot"></div>
+            <h1>Fire AI Radar</h1>
+        </div>
+        <div class="subtitle">Real-time drone monitoring with heatmap visualization & environmental risk integration.
+        </div>
+
+        <div class="mode-toggle">
+            <button class="mode-btn" id="btn-heatmap" onclick="setMode('heatmap')">Heatmap</button>
+            <button class="mode-btn" id="btn-points" onclick="setMode('points')">Points</button>
+            <button class="mode-btn active" id="btn-both" onclick="setMode('both')">Both</button>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-title">Total Scanned Frames</div>
+            <div class="stat-value" id="val-total">--</div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-title">Fire Detected Frames</div>
+            <div class="stat-value danger" id="val-fire">--</div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-title">Max Fire Probability</div>
+            <div class="stat-value" id="val-max">--%</div>
+        </div>
+
+        <div class="legend">
+            <div class="legend-title">Risk Intensity Scale</div>
+            <div class="gradient-bar"></div>
+            <div class="gradient-labels">
+                <span>Low</span>
+                <span>Medium</span>
+                <span>High</span>
+            </div>
+        </div>
+
+        <div class="footer">Powered by PostGIS · Leaflet · Heatmap.js</div>
+    </div>
+
+    <div id="map"></div>
+    <div id="loader">Loading heatmap data...</div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- Leaflet.heat plugin -->
+    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+
+    <script>
+        // ========== MAP SETUP ==========
+        const map = L.map('map', {
+            zoomControl: false,
+            maxZoom: 19
+        }).setView([0, 0], 2);
+
+        L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+        // OpenStreetMap Altligi
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+            maxZoom: 19
+        }).addTo(map);
+
+        // ========== HEATMAP LAYER ==========
+        const heatLayer = L.heatLayer([], {
+            radius: 30,
+            blur: 20,
+            maxZoom: 17,
+            max: 1.0,
+            minOpacity: 0.4,
+            gradient: {
+                0.0: '#22c55e',
+                0.33: '#eab308',
+                0.66: '#f97316',
+                1.0: '#ef4444'
+            }
+        }).addTo(map);
+
+        // ========== POINTS LAYER (clickable markers) ==========
+        let pointsLayer = L.layerGroup().addTo(map);
+
+        // ========== MODE TOGGLE ==========
+        let currentMode = 'both';
+
+        function setMode(mode) {
+            currentMode = mode;
+            document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('btn-' + mode).classList.add('active');
+
+            if (mode === 'heatmap') {
+                map.addLayer(heatLayer);
+                map.removeLayer(pointsLayer);
+            } else if (mode === 'points') {
+                map.removeLayer(heatLayer);
+                map.addLayer(pointsLayer);
+            } else {
+                map.addLayer(heatLayer);
+                map.addLayer(pointsLayer);
+            }
+        }
+
+        // ========== DATA FETCHING ==========
+        let lastTotal = -1;
+        let isFirstLoad = true;
+
+        function getRiskClass(pct) {
+            if (pct >= 60) return 'high';
+            if (pct >= 30) return 'medium';
+            return 'low';
+        }
+
+        function updateDashboard() {
+            // Fetch stats
+            fetch('/api/stats')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('loader').style.display = 'none';
+
+                    if (data.status === 'success' && lastTotal !== data.stats.toplam) {
+                        lastTotal = data.stats.toplam;
+
+                        document.getElementById('val-total').innerText = data.stats.toplam;
+                        document.getElementById('val-fire').innerText = data.stats.yangin;
+                        document.getElementById('val-max').innerText = data.stats.max_yuzde + '%';
+
+                        // Fetch all points for heatmap + markers
+                        fetch('/api/all-points')
+                            .then(r => r.json())
+                            .then(points => {
+                                // Update heatmap
+                                const heatData = points.map(p => [p.lat, p.lon, p.intensity]);
+                                heatLayer.setLatLngs(heatData);
+
+                                // Update point markers
+                                pointsLayer.clearLayers();
+                                points.forEach(p => {
+                                    const riskClass = getRiskClass(p.yuzde);
+                                    const marker = L.circleMarker([p.lat, p.lon], {
+                                        radius: 7,
+                                        fillColor: riskClass === 'high' ? '#ef4444' : riskClass === 'medium' ? '#f97316' : '#22c55e',
+                                        color: '#000',
+                                        weight: 1.5,
+                                        opacity: 0.9,
+                                        fillOpacity: 0.85,
+                                    });
+
+                                    const imgHtml = p.resim_adi
+                                        ? `<img src="/frames/${p.resim_adi}" alt="Frame">`
+                                        : '<div style="padding:20px; color:#94a3b8;">No Image</div>';
+
+                                    marker.bindPopup(`
+                                        <div class="popup-content">
+                                            ${imgHtml}
+                                            <div class="popup-risk ${riskClass}">Risk: ${p.yuzde}%</div>
+                                            <div class="popup-time">${p.zaman}</div>
+                                            <a href="https://www.google.com/maps?q=${p.lat},${p.lon}" target="_blank" style="display: block; margin-top: 10px; background: #3b82f6; color: white; padding: 8px; text-decoration: none; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer;">
+                                                Koordinatı Haritalarda Aç
+                                            </a>
+                                        </div>
+                                    `, { maxWidth: 300 });
+
+                                    marker.on('mouseover', function () { this.openPopup(); });
+                                    pointsLayer.addLayer(marker);
+                                });
+                            });
+
+                        if (isFirstLoad) {
+                            const bounds = L.latLngBounds(data.bounds[0], data.bounds[1]);
+                            map.fitBounds(bounds, { padding: [60, 60], maxZoom: 17 });
+                            isFirstLoad = false;
+                        }
+                    }
+                })
+                .catch(err => {
+                    console.error("Fetch error:", err);
+                    if (isFirstLoad) {
+                        document.getElementById('loader').innerText = "Connection error!";
+                    }
+                });
+        }
+
+        updateDashboard();
+        setInterval(updateDashboard, 2000);
+    </script>
+</body>
+
+</html>
