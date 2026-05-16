@@ -1125,7 +1125,7 @@ def train_one_run(
                 if isinstance(aux_g, dict) and "gate_rgb" in aux_g:
                     gr = float(aux_g["gate_rgb"].mean().detach().cpu())
                     gt = float(aux_g["gate_thermal"].mean().detach().cpu())
-                    print(f"[val] gated fusion mean gates (noisy mini-batch): RGB={gr:.4f} TH={gt:.4f}")
+                    print(f"[val] gated fusion mean gates (realistic mini-batch): RGB={gr:.4f} TH={gt:.4f}")
             except Exception as eg:
                 print(f"[val] gated diagnostics skipped: {type(eg).__name__}: {eg}")
 
@@ -1168,7 +1168,7 @@ def train_one_run(
             n_tn = int((pred == 0).sum())
             fp_rate = n_fp / max(1, len(ey))
             print(
-                f"Extra test noisy ({corr_name}@{corr_sev}) n={len(ey)} "
+                f"Extra test realistic ({corr_name}@{corr_sev}) n={len(ey)} "
                 f"FP={n_fp} TN={n_tn} FP_rate={fp_rate:.3f}"
             )
 
