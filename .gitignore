@@ -1,0 +1,28 @@
+# Visual Studio projeye özel ayarlar ve önbellek
+.vs/
+*.user
+*.suo
+
+# Python Önbellek Dosyaları
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Geçici Çıktı Dosyaları ve Test Verileri
+test_*.txt
+fire_detection_results.txt
+
+# Sanal Ortam (Virtual Environment)
+venv/
+env/
+.env
+
+# Modeller (Zaten devasa boyutlarsa GitHub reddeder)
+*.h5
+*.hdf5
+*.keras
+
+# Video Klasörleri / Büyük Görüntü Dosyaları
+*.mp4
+*.avi
+__temp_qgis_imgs/
