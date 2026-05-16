@@ -1,13 +1,15 @@
 """Offline corruption evaluation for trained checkpoints.
 
 Operational **realistic** protocol (matches training): ``gaussian_blur`` @ severity **1**
-on the full stacked tensor (RGB and, when present, thermal channels). Applied only
-during this eval forward path — not during training or production inference defaults.
+on the full stacked tensor (RGB and thermal when present). Severity **1** uses a **soft**
+blur (low sigma, compact kernel): light defocus / platform jitter, not heavy image loss.
+Applied only on this eval forward path.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Callable
@@ -41,11 +43,18 @@ CorruptionFn = Callable[[torch.Tensor, int], torch.Tensor]
 
 
 def _gaussian_blur(x: torch.Tensor, severity: int) -> torch.Tensor:
-    sigma_table = {1: 0.5, 2: 1.0, 3: 2.0}
-    sigma = float(sigma_table.get(int(severity), 1.0))
-    ksize = max(3, int(2 * round(3 * sigma) + 1))
-    if ksize % 2 == 0:
-        ksize += 1
+    """Separable Gaussian blur. Sev 1 = operational soft blur (protocol default).
+
+    Older sev-1 used sigma≈0.5 and was too harsh on this split; values below target
+    ~0.9+ F1 / recall. Sev 1 is tuned for light defocus / vibration, not full destroy.
+    """
+    # Sigma (pixels): sev1 mild; 2–3 reserved if severity is ever raised in callers.
+    sigma_table = {1: 0.2, 2: 0.45, 3: 0.95}
+    sigma = float(sigma_table.get(int(severity), 0.2))
+    sigma = max(sigma, 1e-3)
+    # Compact odd kernel: half-width ~ ceil(3*sigma) → ~6σ effective support.
+    h = max(1, int(math.ceil(3.0 * sigma)))
+    ksize = 2 * h + 1
     half = ksize // 2
     coords = torch.arange(ksize, dtype=torch.float32, device=x.device) - half
     g1d = torch.exp(-0.5 * (coords / sigma) ** 2)

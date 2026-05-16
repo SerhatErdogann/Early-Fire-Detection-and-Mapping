@@ -44,10 +44,10 @@ def _flt_cell(row: pd.Series | dict, key: str) -> float:
 
 
 def _protocol_metrics_table(row: pd.Series) -> str:
-    """Markdown table for realistic eval (gaussian_blur severity=1)."""
+    """Markdown table for realistic eval (soft gaussian_blur sev=1)."""
     spec = [
-        ("Validation (realistic: gaussian_blur sev=1)", "val_realistic"),
-        ("Test (realistic: gaussian_blur sev=1)", "test_realistic"),
+        ("Validation (realistic: soft gaussian_blur sev=1)", "val_realistic"),
+        ("Test (realistic: soft gaussian_blur sev=1)", "test_realistic"),
     ]
     lines = [
         "| Protocol | F1 | Recall | FPR |",
@@ -60,9 +60,8 @@ def _protocol_metrics_table(row: pd.Series) -> str:
         )
     lines.append("")
     lines.append(
-        "_Realistic evaluation:_ ``gaussian_blur`` severity **1** on the full model input tensor, "
-        "applied **only** at validation/test forward during training and in ``robustness_eval`` "
-        "(not an additive train-time noise target).\n"
+        "_Realistic evaluation:_ **soft** ``gaussian_blur`` severity **1** (mild defocus / jitter), "
+        "full tensor, **only** at val/test forward and in ``robustness_eval`` — not train-time noise.\n"
     )
     return "\n".join(lines)
 
@@ -270,9 +269,9 @@ def main() -> int:
 
     lines = ["# Experiment grid — üç model seçimi\n\n"]
     lines.append(
-        "**Realistic evaluation:** Tüm raporlanan F1 / recall / FPR değerleri **gaussian_blur severity=1** "
-        "ile val/test üzerinde ölçülür (yalnızca eval forward). Clean/stress bantları ve çoklu bozunma "
-        "ızgara taraması kullanılmaz.\n\n"
+        "**Realistic evaluation:** Metrikler **çok hafif** ``gaussian_blur`` severity=1 ile ölçülür "
+        "(operasyonel odak kayması / titreşim benzeri; yalnızca eval forward). Clean/stress ve "
+        "çoklu bozunma grid’i yok.\n\n"
     )
     lines.append(
         "Tasarım hedefi **gerçek kullanımda güvenilir yangın uyarısı**dır (yüksek yakalama + düşük yanlış alarm). "

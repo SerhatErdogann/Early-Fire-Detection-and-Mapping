@@ -118,7 +118,7 @@ def main():
         choices=["f1_balacc", "realistic", "recall_fpr"],
         default="realistic",
         help=(
-            "Checkpoint selection: f1_balacc | realistic (F1+bal_acc+AP−FPR on val with gaussian_blur@1) "
+            "Checkpoint selection: f1_balacc | realistic (F1+bal_acc+AP−FPR on val with soft gaussian_blur@1) "
             "| recall_fpr (recall gate + calibration-aware composite)."
         ),
     )
