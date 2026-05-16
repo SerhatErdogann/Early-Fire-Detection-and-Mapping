@@ -1,10 +1,8 @@
 """Offline corruption evaluation for trained checkpoints.
 
-Default CLI matches training protocol: ``gauss_noise_rgb`` @ severity **1**
-(RGB/fusion); thermal-only checkpoints use ``gauss_noise_thermal`` @ severity **1**.
-Corruptions run **only** during this eval forward path (not in training/inference UI).
-
-Optional ``--legacy_grid`` restores the wider (corruption × severity) sweep incl. ``clean``.
+Operational **realistic** protocol (matches training): ``gaussian_blur`` @ severity **1**
+on the full stacked tensor (RGB and, when present, thermal channels). Applied only
+during this eval forward path — not during training or production inference defaults.
 """
 from __future__ import annotations
 
@@ -12,7 +10,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -37,54 +35,9 @@ from src.training.metrics import metrics_at_threshold  # noqa: E402
 # ---------------------------------------------------------------------------
 # Corruption transforms
 # ---------------------------------------------------------------------------
-# Tensors are expected as (B, C, H, W) float32 with the convention used by
-# ``FlameDataset``: channels 0:3 = RGB scaled to [0, 1]; channel 3 (when
-# present, i.e. fusion / thermal modes) = thermal scaled to [0, 1].
+# Tensors: (B, C, H, W) float32 — channels 0:3 = RGB [0,1]; channel 3 = thermal [0,1].
 
 CorruptionFn = Callable[[torch.Tensor, int], torch.Tensor]
-
-_RGB_CHANNELS = slice(0, 3)
-_THERMAL_CHANNELS = slice(3, None)
-
-
-def _has_thermal(x: torch.Tensor) -> bool:
-    return x.dim() == 4 and x.shape[1] >= 4
-
-
-def _gauss_noise_rgb(x: torch.Tensor, severity: int) -> torch.Tensor:
-    sigma_table = {1: 0.02, 2: 0.05, 3: 0.10}
-    sigma = sigma_table.get(int(severity), 0.05)
-    if x.shape[1] < 1:
-        return x
-    out = x.clone()
-    noise = torch.randn_like(out[:, _RGB_CHANNELS]) * sigma
-    out[:, _RGB_CHANNELS] = (out[:, _RGB_CHANNELS] + noise).clamp_(0.0, 1.0)
-    return out
-
-
-def _gauss_noise_thermal(x: torch.Tensor, severity: int) -> torch.Tensor:
-    if not _has_thermal(x):
-        return x
-    sigma_table = {1: 0.02, 2: 0.05, 3: 0.10}
-    sigma = sigma_table.get(int(severity), 0.05)
-    out = x.clone()
-    noise = torch.randn_like(out[:, _THERMAL_CHANNELS]) * sigma
-    out[:, _THERMAL_CHANNELS] = (out[:, _THERMAL_CHANNELS] + noise).clamp_(0.0, 1.0)
-    return out
-
-
-def _brightness_contrast(x: torch.Tensor, severity: int) -> torch.Tensor:
-    """Apply a deterministic brightness + contrast shift on RGB only."""
-    delta_table = {1: 0.10, 2: 0.20, 3: 0.30}
-    delta = delta_table.get(int(severity), 0.20)
-    contrast_table = {1: 1.10, 2: 1.20, 3: 1.30}
-    contrast = contrast_table.get(int(severity), 1.20)
-    out = x.clone()
-    rgb = out[:, _RGB_CHANNELS]
-    mean = rgb.mean(dim=(2, 3), keepdim=True)
-    rgb = (rgb - mean) * contrast + mean + delta
-    out[:, _RGB_CHANNELS] = rgb.clamp_(0.0, 1.0)
-    return out
 
 
 def _gaussian_blur(x: torch.Tensor, severity: int) -> torch.Tensor:
@@ -103,56 +56,16 @@ def _gaussian_blur(x: torch.Tensor, severity: int) -> torch.Tensor:
     return F.conv2d(x, kernel, padding=half, groups=c)
 
 
-def _thermal_shift(x: torch.Tensor, severity: int) -> torch.Tensor:
-    if not _has_thermal(x):
-        return x
-    shift_table = {1: 0.05, 2: 0.10, 3: 0.20}
-    shift = float(shift_table.get(int(severity), 0.10))
-    out = x.clone()
-    out[:, _THERMAL_CHANNELS] = (out[:, _THERMAL_CHANNELS] + shift).clamp_(0.0, 1.0)
-    return out
-
-
 CORRUPTIONS: dict[str, CorruptionFn] = {
-    "gauss_noise_rgb": _gauss_noise_rgb,
-    "gauss_noise_thermal": _gauss_noise_thermal,
-    "brightness_contrast": _brightness_contrast,
     "gaussian_blur": _gaussian_blur,
-    "thermal_shift": _thermal_shift,
 }
 
-def protocol_corruption(mode: str) -> tuple[str, int]:
-    """Single operational eval corruption (name, severity), matching the training protocol."""
-    if str(mode).lower() == "thermal":
-        return ("gauss_noise_thermal", 1)
-    return ("gauss_noise_rgb", 1)
+PROTOCOL_SEVERITY = 1
 
 
-def _resolve_corruptions(spec: str, mode: str) -> list[str]:
-    """Expand the CLI ``--corruptions`` flag into a concrete list of names."""
-    spec = (spec or "all").strip()
-    if spec.lower() in {"all", "*"}:
-        names = list(CORRUPTIONS.keys())
-    else:
-        names = [s.strip() for s in spec.split(",") if s.strip()]
-        unknown = [n for n in names if n not in CORRUPTIONS]
-        if unknown:
-            raise SystemExit(
-                f"Unknown corruption name(s): {unknown}. "
-                f"Available: {sorted(CORRUPTIONS.keys())}"
-            )
-    if mode == "rgb":
-        names = [n for n in names if not n.startswith("gauss_noise_thermal") and n != "thermal_shift"]
-    elif mode == "thermal":
-        names = [n for n in names if n not in ("gauss_noise_rgb", "brightness_contrast")]
-    return names
-
-
-def realistic_noisy_corruption_names(mode: str) -> list[str]:
-    """Corruption name(s) active for protocol eval on ``mode``."""
-    cn, _ = protocol_corruption(mode)
-    resolved = _resolve_corruptions(str(cn), str(mode).lower())
-    return [n for n in resolved if n == cn]
+def protocol_corruption(_mode: str) -> tuple[str, int]:
+    """Single operational eval corruption: mild Gaussian blur, severity 1."""
+    return ("gaussian_blur", PROTOCOL_SEVERITY)
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +81,6 @@ def _load_index(path: str) -> pd.DataFrame:
 
 
 def _select_split(df: pd.DataFrame, split: str) -> pd.DataFrame:
-    """Return the rows belonging to ``split`` ('val' / 'test' / 'all')."""
     split = (split or "test").lower()
     if split == "all":
         return df
@@ -275,7 +187,7 @@ def eval_logits_corrupted(
     seed: int = 0,
     max_batches: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Forward pass logits with corruption on inputs (temperature applied later by trainer)."""
+    """Forward with corruption on inputs (temperature scaling is done by the caller)."""
     torch.manual_seed(int(seed))
     np.random.seed(int(seed))
     fn = CORRUPTIONS[str(corruption_name)]
@@ -298,21 +210,6 @@ def eval_logits_corrupted(
     return np.asarray(ys, dtype=np.int64), np.concatenate(logits_list, axis=0)
 
 
-def _parse_severities(spec: str) -> list[int]:
-    out: list[int] = []
-    for tok in str(spec or "").split(","):
-        tok = tok.strip()
-        if not tok:
-            continue
-        try:
-            v = int(tok)
-        except ValueError:
-            continue
-        if 1 <= v <= 3:
-            out.append(v)
-    return out or [1]
-
-
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
@@ -322,8 +219,6 @@ def run_robustness(
     ckpt_path: str,
     csv_path: str,
     split: str = "test",
-    corruptions: Iterable[str] | str = "all",
-    severities: Iterable[int] | str = (1,),
     out_csv: str | None = "outputs/robustness_eval.csv",
     bs: int = 16,
     num_workers: int = 0,
@@ -334,12 +229,8 @@ def run_robustness(
     thermal_mu: float | None = None,
     thermal_sigma: float | None = None,
     metrics_json: str | None = None,
-    legacy_grid: bool = False,
 ) -> pd.DataFrame:
-    """Evaluate checkpoint; default is protocol-only (:func:`protocol_corruption` @ sev 1).
-
-    Pass ``legacy_grid=True`` for clean row + arbitrary ``corruptions``/``severities`` sweep.
-    """
+    """Evaluate checkpoint under the **realistic** protocol (``gaussian_blur`` @ severity 1)."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.manual_seed(int(seed))
     np.random.seed(int(seed))
@@ -360,18 +251,6 @@ def run_robustness(
         raise SystemExit(f"No rows available for split={split!r} after filtering.")
 
     proto_c, proto_s = protocol_corruption(str(info["mode"]))
-    if legacy_grid:
-        if isinstance(corruptions, str):
-            corr_names = _resolve_corruptions(corruptions, info["mode"])
-        else:
-            corr_names = list(corruptions)
-        if isinstance(severities, str):
-            sev_list = _parse_severities(severities)
-        else:
-            sev_list = [int(s) for s in severities if 1 <= int(s) <= 3]
-    else:
-        corr_names = [proto_c]
-        sev_list = [int(proto_s)]
 
     thermal_norm = thermal_norm_from_checkpoint(ck)
     th_mu, th_sigma = resolve_thermal_calibration_or_exit(
@@ -388,11 +267,12 @@ def run_robustness(
         f"backbone={info['backbone']} size={info['size']} threshold={threshold:.3f} T={temperature:.3f} "
         f"thermal_norm={thermal_norm!r}"
     )
-    print(f"[robustness] split={split} n={len(df_split)} corruptions={corr_names} severities={sev_list}")
-
-    ds_kw: dict = dict(
-        mode=info["mode"], size=info["size"], train=False, thermal_norm=thermal_norm
+    print(
+        f"[robustness] split={split} n={len(df_split)} "
+        f"realistic_protocol={proto_c}@{proto_s}"
     )
+
+    ds_kw: dict = dict(mode=info["mode"], size=info["size"], train=False, thermal_norm=thermal_norm)
     if th_mu is not None:
         ds_kw["thermal_mu"] = th_mu
         ds_kw["thermal_sigma"] = float(th_sigma)
@@ -406,27 +286,15 @@ def run_robustness(
     )
 
     rows: list[dict] = []
-
-    if legacy_grid:
-        ys_clean, probs_clean = _eval_loader(model, loader, device, temperature, corruption=None, severity=0)
-        rows.append(_row_for(ys_clean, probs_clean, threshold, "clean", 0))
-        print(
-            f"[robustness][legacy_grid] clean acc={rows[-1]['acc']:.3f} f1={rows[-1]['f1']:.3f} "
-            f"recall={rows[-1]['recall']:.3f} fpr={rows[-1]['false_positive_rate']:.3f} "
-            f"auc={rows[-1]['auc']:.3f} ap={rows[-1]['ap']:.3f}"
-        )
-
-    for name in corr_names:
-        fn = CORRUPTIONS[name]
-        for sev in sev_list:
-            ys, probs = _eval_loader(model, loader, device, temperature, fn, sev)
-            row = _row_for(ys, probs, threshold, name, sev)
-            rows.append(row)
-            print(
-                f"[robustness] {name:<22} sev={sev}  acc={row['acc']:.3f} f1={row['f1']:.3f} "
-                f"recall={row['recall']:.3f} fpr={row['false_positive_rate']:.3f} "
-                f"auc={row['auc']:.3f} ap={row['ap']:.3f}"
-            )
+    fn = CORRUPTIONS[proto_c]
+    ys, probs = _eval_loader(model, loader, device, temperature, fn, proto_s)
+    row = _row_for(ys, probs, threshold, proto_c, proto_s)
+    rows.append(row)
+    print(
+        f"[robustness] {proto_c:<22} sev={proto_s}  acc={row['acc']:.3f} f1={row['f1']:.3f} "
+        f"recall={row['recall']:.3f} fpr={row['false_positive_rate']:.3f} "
+        f"auc={row['auc']:.3f} ap={row['ap']:.3f}"
+    )
 
     df_out = pd.DataFrame(rows)
     if out_csv:
@@ -446,10 +314,7 @@ def run_robustness(
                     "thermal_norm_ds": thermal_norm,
                     "thermal_mu": th_mu,
                     "thermal_sigma": th_sigma,
-                    "corruptions": corr_names,
-                    "severities": sev_list,
-                    "legacy_grid": bool(legacy_grid),
-                    "protocol_default": (not legacy_grid),
+                    "realistic_protocol": f"{proto_c}@{proto_s}",
                     "n_rows": int(len(df_split)),
                 },
                 indent=2,
@@ -463,30 +328,18 @@ def run_robustness(
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Robustness sweep for a trained fire-detection checkpoint."
+        description="Realistic-protocol robustness eval (gaussian_blur severity=1 only)."
     )
     ap.add_argument("--ckpt", required=True, help="Path to trained checkpoint (.pt)")
     ap.add_argument("--csv", required=True, help="Master index CSV / parquet with split column.")
     ap.add_argument("--split", default="test", choices=["val", "test", "all"], help="Which rows to evaluate.")
-    ap.add_argument(
-        "--corruptions",
-        default="gauss_noise_rgb",
-        help=(
-            "Legacy-grid only: comma-separated corruption names or 'all'. Ignored unless --legacy-grid."
-        ),
-    )
-    ap.add_argument(
-        "--severities",
-        default="1",
-        help="Legacy-grid only: comma-separated severities (1–3). Ignored unless --legacy-grid.",
-    )
     ap.add_argument("--out", default="outputs/robustness_eval.csv", help="Output CSV path.")
     ap.add_argument("--bs", type=int, default=16)
     ap.add_argument("--num_workers", type=int, default=0)
     ap.add_argument("--pin_memory", type=int, default=0, choices=[0, 1])
     ap.add_argument("--temperature", type=float, default=None, help="Override calibration T (default: from ckpt).")
     ap.add_argument("--threshold", type=float, default=None, help="Override decision threshold (default: from ckpt).")
-    ap.add_argument("--seed", type=int, default=0, help="RNG seed for reproducible noise.")
+    ap.add_argument("--seed", type=int, default=0, help="RNG seed for reproducibility.")
     ap.add_argument(
         "--metrics_json",
         default=None,
@@ -504,20 +357,12 @@ def main() -> int:
         default=None,
         help="Override thermal std for train_zscore / global_zscore (use with --thermal_mu).",
     )
-    ap.add_argument(
-        "--legacy-grid",
-        action="store_true",
-        help="Include clean baseline row and honor --corruptions/--severities sweep (legacy debugging). "
-        "Default: protocol corruption only gauss_noise_rgb@1 or gauss_noise_thermal@1.",
-    )
     args = ap.parse_args()
 
     run_robustness(
         ckpt_path=args.ckpt,
         csv_path=args.csv,
         split=args.split,
-        corruptions=args.corruptions,
-        severities=args.severities,
         out_csv=args.out,
         bs=int(args.bs),
         num_workers=int(args.num_workers),
@@ -528,7 +373,6 @@ def main() -> int:
         thermal_mu=args.thermal_mu,
         thermal_sigma=args.thermal_sigma,
         metrics_json=args.metrics_json,
-        legacy_grid=bool(args.legacy_grid),
     )
     return 0
 

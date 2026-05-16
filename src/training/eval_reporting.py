@@ -367,5 +367,5 @@ operational_score_from_test_row = operational_score_from_improve_realistic_row
 
 
 def balanced_realistic_rank_score(row: dict) -> float:
-    """Blend noisy val/test F1 for balanced deployment picks."""
+    """Blend realistic val/test F1 for balanced deployment picks."""
     return 0.45 * _safe_metric(row.get("val_realistic_f1")) + 0.55 * _safe_metric(row.get("test_realistic_f1"))

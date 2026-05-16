@@ -8,7 +8,7 @@ Reads ``outputs/improve_results.csv`` (typically produced on Kaggle) and writes
 - **best_low_false_alarm_model** — lowest test FPR among runs meeting realistic recall gate.
 - **best_balanced_model** — blends val/test realistic F1 (deployment-friendly balance).
 
-Operational scoring uses noisy-test columns only (:func:`operational_score_from_improve_realistic_row`).
+Operational scoring uses realistic-test columns only (:func:`operational_score_from_improve_realistic_row`).
 
 If ``--copy_balanced_ckpt`` (default ``best_model.pt``), the balanced pick is copied.
 When the CSV is missing (local-only dev machine), exits **0** and writes a short stub Markdown.
@@ -44,10 +44,10 @@ def _flt_cell(row: pd.Series | dict, key: str) -> float:
 
 
 def _protocol_metrics_table(row: pd.Series) -> str:
-    """Markdown table for operational eval rows only."""
+    """Markdown table for realistic eval (gaussian_blur severity=1)."""
     spec = [
-        ("Validation (protocol noise @ eval)", "val_realistic"),
-        ("Test (protocol noise @ eval)", "test_realistic"),
+        ("Validation (realistic: gaussian_blur sev=1)", "val_realistic"),
+        ("Test (realistic: gaussian_blur sev=1)", "test_realistic"),
     ]
     lines = [
         "| Protocol | F1 | Recall | FPR |",
@@ -60,10 +60,9 @@ def _protocol_metrics_table(row: pd.Series) -> str:
         )
     lines.append("")
     lines.append(
-        "_Operational protocol:_ mild Gaussian corruption on RGB (fusion/RGB checkpoints) "
-        "or thermal (thermal-only) at severity **1**, applied **only** at eval forward "
-        "(not training). Offline sweeps may use ``robustness_eval.py --legacy-grid`` "
-        "for wider corruption grids.\n"
+        "_Realistic evaluation:_ ``gaussian_blur`` severity **1** on the full model input tensor, "
+        "applied **only** at validation/test forward during training and in ``robustness_eval`` "
+        "(not an additive train-time noise target).\n"
     )
     return "\n".join(lines)
 
@@ -110,7 +109,7 @@ def _format_pick(title: str, row: pd.Series, *, ckpt_hint: Path | None) -> list[
     lines += ["\n", _protocol_metrics_table(row), "\n"]
     osc = operational_score_from_improve_realistic_row(_row_series_to_dict(row))
     if osc == osc:
-        lines.append(f"- **deployment composite (noisy test + default calib prior)**: {osc:.4f}\n")
+        lines.append(f"- **deployment composite (realistic test + default calib prior)**: {osc:.4f}\n")
     lines += [
         f"- **checkpoint path**: `{row.get('out_ckpt', '')}`\n",
     ]
@@ -177,6 +176,8 @@ def main() -> int:
         "test_realistic_fpr",
         "test_realistic_f1",
         "val_realistic_f1",
+        "val_realistic_recall",
+        "val_realistic_fpr",
     ]
     miss = [c for c in req if c not in df.columns]
     if miss:
@@ -269,9 +270,9 @@ def main() -> int:
 
     lines = ["# Experiment grid — üç model seçimi\n\n"]
     lines.append(
-        "**Değerlendirme protokolü.** Tüm raporlanan F1 / recall / FPR değerleri **operasyonel** "
-        "değerlendirmedir: tek tip hafif Gaussian gürültü (RGB veya termal, severity 1, yalnızca eval forward). "
-        "Laboratuvar tipi **clean** bantları ve ayrı **stress** paketi kaldırılmıştır.\n\n"
+        "**Realistic evaluation:** Tüm raporlanan F1 / recall / FPR değerleri **gaussian_blur severity=1** "
+        "ile val/test üzerinde ölçülür (yalnızca eval forward). Clean/stress bantları ve çoklu bozunma "
+        "ızgara taraması kullanılmaz.\n\n"
     )
     lines.append(
         "Tasarım hedefi **gerçek kullanımda güvenilir yangın uyarısı**dır (yüksek yakalama + düşük yanlış alarm). "
