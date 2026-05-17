@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Early Fire Detection | Multimodal Wildfire Detection</title>
+    <meta name="description"
+        content="Development of an AI-based system for early forest fire warning and rapid response using thermal imaging and mapping.">
+    <link rel="stylesheet" href="styles.css">
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+        rel="stylesheet">
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+
+<body>
+    <!-- Navbar -->
+    <nav class="navbar">
+        <div class="logo">
+            <i class="fa-solid fa-fire-flame-curved"></i> Early Fire Detection
+        </div>
+        <ul class="nav-links">
+            <li><a href="#about">About</a></li>
+            <li><a href="#pipeline">Pipeline</a></li>
+            <li><a href="#dashboard">Dashboard</a></li>
+            <li><a href="#tech">Technologies</a></li>
+        </ul>
+        <a href="https://github.com/SerhatErdogann" target="_blank" class="btn-github"><i
+                class="fa-brands fa-github"></i> GitHub</a>
+    </nav>
+
+    <!-- Hero Section -->
+    <section class="hero" id="home">
+        <div class="hero-content">
+            <div class="badge">TUSAŞ LIFT-UP Supported Project</div>
+            <h1>Multimodal AI for <span class="highlight">Early Wildfire Detection</span></h1>
+            <p>A real-time, drone-based forest fire warning system combining RGB & Thermal imagery with Google Earth
+                Engine environmental data.</p>
+            <div class="hero-buttons">
+                <a href="#pipeline" class="btn-primary">Explore Pipeline <i class="fa-solid fa-arrow-right"></i></a>
+                <a href="#dashboard" class="btn-secondary">View Dashboard</a>
+            </div>
+        </div>
+        <div class="hero-image">
+            <div class="glass-card">
+                <img src="https://images.unsplash.com/photo-1595981267035-7b04d84832e0?auto=format&fit=crop&q=80&w=800"
+                    alt="Drone in forest" class="floating-img">
+
+                <!-- Expanded Metrics Panel -->
+                <div class="metrics-panel">
+                    <div class="metric-item">
+                        <i class="fa-solid fa-bullseye"></i>
+                        <div>
+                            <span class="stat-num">97.0%</span>
+                            <span class="stat-text">Accuracy</span>
+                        </div>
+                    </div>
+                    <div class="metric-item">
+                        <i class="fa-solid fa-star"></i>
+                        <div>
+                            <span class="stat-num">96.9%</span>
+                            <span class="stat-text">F1-Score</span>
+                        </div>
+                    </div>
+                    <div class="metric-item">
+                        <i class="fa-solid fa-eye"></i>
+                        <div>
+                            <span class="stat-num">99.5%</span>
+                            <span class="stat-text">Recall</span>
+                        </div>
+                    </div>
+                    <div class="metric-item">
+                        <i class="fa-solid fa-check-double"></i>
+                        <div>
+                            <span class="stat-num">94.4%</span>
+                            <span class="stat-text">Precision</span>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </section>
+
+    <!-- Problem & Motivation -->
+    <section class="about" id="about">
+        <div class="section-header">
+            <h2>Problem & Motivation</h2>
+            <p>Why we built this system</p>
+        </div>
+        <div class="about-grid">
+            <div class="about-card">
+                <i class="fa-solid fa-tree"></i>
+                <h3>Ecological Damage</h3>
+                <p>Wildfires spread rapidly and cause severe ecological and economic damage, especially when detection
+                    and response are delayed.</p>
+            </div>
+            <div class="about-card">
+                <i class="fa-solid fa-drone"></i>
+                <h3>Continuous Monitoring</h3>
+                <p>Continuous aerial monitoring using drones can support faster and more dynamic wildfire detection
+                    across vast forest regions.</p>
+            </div>
+            <div class="about-card">
+                <i class="fa-solid fa-layer-group"></i>
+                <h3>Multimodal Analysis</h3>
+                <p>Relying solely on RGB vision is prone to false alarms (e.g. sunset, smoke). Combining RGB with
+                    Thermal cameras improves reliability.</p>
+            </div>
+
+        </div>
+    </section>
+
+    <!-- Pipeline Section -->
+    <section class="pipeline" id="pipeline">
+        <div class="section-header">
+            <h2>Fire Detection Pipeline</h2>
+            <p>How the AI processes real-time data</p>
+        </div>
+
+        <div class="timeline">
+            <div class="timeline-item">
+                <div class="timeline-icon"><i class="fa-solid fa-video"></i></div>
+                <div class="timeline-content">
+                    <h3>1. Inputs</h3>
+                    <p>Real-time RGB images, Thermal images, and GPS coordinates are captured by the drone.</p>
+                </div>
+            </div>
+            <div class="timeline-item">
+                <div class="timeline-icon"><i class="fa-solid fa-cogs"></i></div>
+                <div class="timeline-content">
+                    <h3>2. Preprocessing</h3>
+                    <p>Frame extraction, resizing to 224x224, and data normalization for neural network compatibility.
+                    </p>
+                </div>
+            </div>
+            <div class="timeline-item">
+                <div class="timeline-icon"><i class="fa-solid fa-network-wired"></i></div>
+                <div class="timeline-content">
+                    <h3>3. Feature Extraction</h3>
+                    <p>Dual-branch Convolutional Neural Networks (ResNet) process RGB and Thermal data independently to
+                        extract critical features.</p>
+                </div>
+            </div>
+            <div class="timeline-item">
+                <div class="timeline-icon"><i class="fa-solid fa-satellite"></i></div>
+                <div class="timeline-content">
+                    <h3>4. Fuel Scorer & Fusion</h3>
+                    <p>Visual features are concatenated with environmental data (NDVI, NDMI, Land Cover) fetched
+                        dynamically from Google Earth Engine.</p>
+                </div>
+            </div>
+            <div class="timeline-item">
+                <div class="timeline-icon"><i class="fa-solid fa-chart-pie"></i></div>
+                <div class="timeline-content">
+                    <h3>5. Output</h3>
+                    <p>The system predicts Risk Probability, Fire Status, and outputs a Risk Classification sent
+                        instantly to the database.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Dashboard Showcase -->
+    <section class="dashboard" id="dashboard">
+        <div class="dashboard-content">
+            <h2>GIS Visualization Dashboard</h2>
+            <p>The backend writes predictions to a PostGIS database instantly. The Leaflet.js powered frontend
+                visualizes the drone's flight path and fire risk zones in real-time.</p>
+            <ul class="feature-list">
+                <li><i class="fa-solid fa-check"></i> Real-time Heatmap generation</li>
+                <li><i class="fa-solid fa-check"></i> Interactive risk markers (Low, Medium, High)</li>
+                <li><i class="fa-solid fa-check"></i> Google Maps coordinate integration</li>
+                <li><i class="fa-solid fa-check"></i> Dynamic mode switching (Heatmap/Points)</li>
+            </ul>
+        </div>
+        <div class="dashboard-image">
+            <!-- NOT: BURAYA KENDİ DASHBOARD EKRAN GÖRÜNTÜNÜ KOYABİLİRSİN -->
+            <div class="placeholder-image">
+                <img src="C:\Users\SERHAT\Desktop\Projeler\bitirme_proje\project-showcase\image.png"
+                    alt="Map UI Placeholder">
+            </div>
+        </div>
+    </section>
+
+    <!-- Tech Stack -->
+    <section class="tech-stack" id="tech">
+        <div class="section-header">
+            <h2>Technologies Used</h2>
+        </div>
+        <div class="tech-grid">
+            <div class="tech-item"><i class="fa-brands fa-python"></i> PyTorch</div>
+            <div class="tech-item"><i class="fa-solid fa-database"></i> PostgreSQL / PostGIS</div>
+            <div class="tech-item"><i class="fa-solid fa-globe"></i> Google Earth Engine</div>
+            <div class="tech-item"><i class="fa-solid fa-map-location-dot"></i> Leaflet.js</div>
+            <div class="tech-item"><i class="fa-brands fa-html5"></i> Flask</div>
+            <div class="tech-item"><i class="fa-solid fa-network-wired"></i> ResNet50</div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <div class="footer-content">
+            <div class="footer-logo"><i class="fa-solid fa-fire-flame-curved"></i> Early Fire Detection</div>
+            <p>Developed by Asude Dila Açıkgöz, İlknur Nazlı Koşar and Serhat Erdoğan. Supervised by Fatma Yerlikaya
+                Özkurt & Kadir Durdu.</p>
+            <p>Ankara Yıldırım Beyazıt University | Department of Computer Engineering | TUSAŞ LIFT-UP</p>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+
+</html>
