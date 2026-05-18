@@ -1,0 +1,8 @@
+name: fire-detection-py311
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -r requirements.txt

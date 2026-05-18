@@ -119,6 +119,20 @@ def main():
     )
 
     parser.add_argument(
+        "--threshold_mode",
+        choices=["fixed", "absolute", "percentile", "hybrid"],
+        default="hybrid",
+        help="Thermal mask thresholding mode"
+    )
+
+    parser.add_argument(
+        "--threshold_value",
+        type=float,
+        default=210,
+        help="Raw thermal/grayscale threshold used by fixed/absolute/hybrid modes"
+    )
+
+    parser.add_argument(
         "--min_area",
         type=int,
         default=300,
@@ -206,10 +220,13 @@ def main():
 
         mask, thermal_norm = create_fire_mask_from_thermal(
             thermal_frame,
-            threshold_mode="percentile",
+            threshold_mode=args.threshold_mode,
+            threshold_value=args.threshold_value,
             percentile_value=args.percentile,
             min_area=args.min_area,
-            use_strong_closing=args.strong_closing
+            kernel_size=9,
+            use_strong_closing=args.strong_closing,
+            dilate_iterations=0,
         )
 
         fire_regions = extract_fire_regions(
@@ -276,7 +293,8 @@ def main():
                 "mask_path": str(mask_path),
                 "thermal_overlay_path": str(thermal_overlay_path),
                 "rgb_overlay_path": str(rgb_overlay_path) if rgb_overlay_path else None,
-                "threshold_mode": "percentile",
+                "threshold_mode": args.threshold_mode,
+                "threshold_value": args.threshold_value,
                 "percentile_value": args.percentile,
                 "min_area": args.min_area,
                 "strong_closing": args.strong_closing

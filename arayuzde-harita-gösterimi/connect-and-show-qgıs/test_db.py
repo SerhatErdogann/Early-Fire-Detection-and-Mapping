@@ -1,13 +1,26 @@
 import psycopg2
 from psycopg2 import OperationalError
+import os
+import sys
+from pathlib import Path
+
+for parent in Path(__file__).resolve().parents:
+    if (parent / "env_utils.py").is_file():
+        sys.path.insert(0, str(parent))
+        break
+
+from env_utils import load_project_env
+
+
+load_project_env(__file__)
 
 def test_connection():
     db_config = {
-        "host": "localhost",
-        "port": 5432,
-        "database": "cografi_veritabani",
-        "user": "postgres",
-        "password": "1313"
+        "host": os.getenv("POSTGIS_HOST", "localhost"),
+        "port": int(os.getenv("POSTGIS_PORT", "5432")),
+        "database": os.getenv("POSTGIS_DB", "cografi_veritabani"),
+        "user": os.getenv("POSTGIS_USER", "postgres"),
+        "password": os.getenv("POSTGIS_PASSWORD", "postgres"),
     }
 
     try:

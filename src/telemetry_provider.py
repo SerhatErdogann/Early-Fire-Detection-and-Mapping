@@ -19,9 +19,10 @@ class DjiCsvTelemetryProvider:
         telemetry_provider.get_current(video_time_s)
     """
 
-    def __init__(self, csv_path, video_duration_s):
+    def __init__(self, csv_path, video_duration_s, telemetry_offset_s=None):
         self.csv_path = csv_path
         self.video_duration_s = video_duration_s
+        self.telemetry_offset_s = telemetry_offset_s
 
         self.df = self._read_csv(csv_path)
 
@@ -30,11 +31,6 @@ class DjiCsvTelemetryProvider:
         self.telemetry_duration = self.telemetry_end - self.telemetry_start
 
     def _read_csv(self, csv_path):
-        try:
-            df = pd.read_csv(csv_path, skiprows=1)
-        except Exception:
-            df = pd.read_csv(csv_path)
-
         required_columns = [
             "OSD.flyTime [s]",
             "OSD.latitude",
@@ -46,10 +42,35 @@ class DjiCsvTelemetryProvider:
             "GIMBAL.yaw [360]"
         ]
 
-        missing = [col for col in required_columns if col not in df.columns]
+        aliases = {
+            "OSD.flyTime [s]": ["OSD.flyTime", "flyTime [s]", "time_s", "saniye"],
+            "OSD.latitude": ["latitude", "lat", "enlem"],
+            "OSD.longitude": ["longitude", "lon", "lng", "boylam"],
+            "OSD.height [ft]": ["height_ft", "height [ft]", "OSD.height"],
+            "OSD.altitude [ft]": ["altitude_ft", "altitude [ft]", "OSD.altitude"],
+            "OSD.yaw [360]": ["yaw", "drone_yaw", "OSD.yaw"],
+            "GIMBAL.pitch": ["gimbal_pitch", "pitch"],
+            "GIMBAL.yaw [360]": ["gimbal_yaw", "GIMBAL.yaw", "gimbal yaw"],
+        }
+
+        candidates = []
+        for skiprows in (0, 1):
+            try:
+                df = pd.read_csv(csv_path, skiprows=skiprows)
+                df = self._apply_aliases(df, aliases)
+                missing = [col for col in required_columns if col not in df.columns]
+                candidates.append((missing, df, skiprows))
+                if not missing:
+                    break
+            except Exception:
+                continue
+        else:
+            raise ValueError(f"Telemetry CSV could not be read: {csv_path}")
+
+        missing, df, skiprows_used = min(candidates, key=lambda item: len(item[0]))
 
         if missing:
-            raise ValueError(f"Missing telemetry columns: {missing}")
+            raise ValueError(f"Missing telemetry columns after CSV parse (skiprows={skiprows_used}): {missing}")
 
         for col in required_columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -66,6 +87,20 @@ class DjiCsvTelemetryProvider:
 
         return df
 
+    @staticmethod
+    def _apply_aliases(df, aliases):
+        rename = {}
+        lower_to_col = {str(col).strip().lower(): col for col in df.columns}
+        for canonical, names in aliases.items():
+            if canonical in df.columns:
+                continue
+            for name in names:
+                match = lower_to_col.get(name.lower())
+                if match is not None:
+                    rename[match] = canonical
+                    break
+        return df.rename(columns=rename)
+
     def get_current(self, video_time_s):
         """
         Canlı sistemde bu fonksiyon o anki drone telemetry bilgisini döndürür.
@@ -74,7 +109,9 @@ class DjiCsvTelemetryProvider:
             video zamanı telemetry uçuş zamanına normalize edilir.
         """
 
-        if self.video_duration_s <= 0 or self.telemetry_duration <= 0:
+        if self.telemetry_offset_s is not None:
+            sim_flight_time_s = self.telemetry_start + float(video_time_s) + float(self.telemetry_offset_s)
+        elif self.video_duration_s <= 0 or self.telemetry_duration <= 0:
             sim_flight_time_s = self.telemetry_start
         else:
             video_ratio = video_time_s / self.video_duration_s

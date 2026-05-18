@@ -5,15 +5,27 @@ Orijinal app.py'ye dokunmaz.
 from flask import Flask, render_template, jsonify, send_from_directory
 import psycopg2
 import os
+import sys
+from pathlib import Path
+
+for parent in Path(__file__).resolve().parents:
+    if (parent / "env_utils.py").is_file():
+        sys.path.insert(0, str(parent))
+        break
+
+from env_utils import load_project_env
+
+
+load_project_env(__file__)
 
 app = Flask(__name__)
 
 DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "database": "cografi_veritabani",
-    "user": "postgres",
-    "password": "1313"
+    "host": os.getenv("POSTGIS_HOST", "localhost"),
+    "port": int(os.getenv("POSTGIS_PORT", "5432")),
+    "database": os.getenv("POSTGIS_DB", "cografi_veritabani"),
+    "user": os.getenv("POSTGIS_USER", "postgres"),
+    "password": os.getenv("POSTGIS_PASSWORD", "postgres"),
 }
 
 def get_db_connection():
@@ -99,4 +111,8 @@ def all_points():
 
 if __name__ == '__main__':
     print("\n  HEATMAP DEMO -> http://127.0.0.1:5001\n")
-    app.run(debug=True, host='0.0.0.0', port=5001)
+    app.run(
+        debug=os.getenv("FLASK_DEBUG", "0") == "1",
+        host=os.getenv("FLASK_HOST", "127.0.0.1"),
+        port=int(os.getenv("FLASK_PORT", "5001")),
+    )

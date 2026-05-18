@@ -1,70 +1,51 @@
 # src/model_loader.py
+from __future__ import annotations
 
 import torch
 
-from models.cls.fusion_variants import DualBranchGatedFusion
+try:
+    from src.inference.model_loader import load_checkpoint
+except ImportError:
+    from inference.model_loader import load_checkpoint
 
 
-def load_dual_branch_model(
-    checkpoint_path="outputs/checkpoints/dual_branch.pt",
-    device=None
-):
+def _read_checkpoint_meta(checkpoint_path, device):
+    try:
+        return torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        return torch.load(checkpoint_path, map_location=device)
+
+
+def load_dual_branch_model(checkpoint_path="outputs/checkpoints/dual_branch.pt", device=None):
     """
-    dual_branch_gated_fusion checkpoint'ini yükler.
+    Backward-compatible loader for live/unified pipelines.
+
+    The actual checkpoint restoration is delegated to src.inference.model_loader,
+    which supports all current fusion families instead of only the gated variant.
     """
-
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    ckpt = torch.load(checkpoint_path, map_location=device)
-
-    model_family = ckpt.get("model_family")
-    backbone = ckpt.get("backbone", "resnet50")
-    threshold = ckpt.get("threshold_recommended", ckpt.get("threshold", 0.5))
-    input_size = ckpt.get("input_size", 384)
-    temperature = ckpt.get("temperature", 1.0)
-
-    if model_family != "dual_branch_gated_fusion":
-        raise ValueError(f"Unsupported model_family: {model_family}")
-
-    model = DualBranchGatedFusion(
-        backbone=backbone,
-        num_classes=2,
-        pretrained=False
-    )
-
-    state_dict = ckpt["state"]
-    model.load_state_dict(state_dict, strict=True)
-
-    model.to(device)
-    model.eval()
+    model, mode, resolved_device, threshold, temperature = load_checkpoint(checkpoint_path)
+    ckpt = _read_checkpoint_meta(checkpoint_path, resolved_device)
 
     return model, {
-        "device": device,
-        "threshold": threshold,
-        "input_size": input_size,
-        "temperature": temperature,
+        "device": resolved_device,
+        "threshold": float(ckpt.get("threshold_recommended", threshold)),
+        "input_size": int(ckpt.get("input_size", ckpt.get("size", 384))),
+        "temperature": float(temperature),
         "class_mapping": ckpt.get("class_mapping"),
-        "model_family": model_family,
-        "backbone": backbone
+        "model_family": ckpt.get("model_family") or ckpt.get("arch"),
+        "backbone": ckpt.get("backbone", "resnet18"),
+        "mode": mode,
     }
 
 
 def predict_fire_probability(model, input_tensor, temperature=1.0):
     """
-    Modelden fire probability döndürür.
-    input_tensor shape:
-        [1, 4, H, W]
+    Modelden fire probability dondurur.
+    input_tensor shape: [1, C, H, W]
     """
-
     with torch.no_grad():
         logits = model(input_tensor)
-
         if temperature and temperature > 0:
             logits = logits / temperature
-
         probs = torch.softmax(logits, dim=1)
-
-        fire_prob = probs[0, 1].item()
-
-    return fire_prob
+        return float(probs[0, 1].item())

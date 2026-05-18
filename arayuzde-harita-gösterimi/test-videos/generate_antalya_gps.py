@@ -50,11 +50,19 @@ df = pd.DataFrame({
     'OSD.flyTime [s]': time_s,
     'CUSTOM.date [local]': [datetime.now().strftime("%Y-%m-%d %H:%M:%S")] * total_points,
     'OSD.latitude': latitudes,
-    'OSD.longitude': longitudes
+    'OSD.longitude': longitudes,
+    'OSD.height [ft]': [150.0] * total_points,
+    'OSD.altitude [ft]': [150.0] * total_points,
+    'OSD.yaw [360]': [0.0] * total_points,
+    'GIMBAL.pitch': [-90.0] * total_points,
+    'GIMBAL.yaw [360]': [0.0] * total_points
 })
 
 # Çıktı dizini
-out_dir = r"c:\Users\SERHAT\Desktop\Projeler\bitirme_proje\bitki-verisi\test-videos"
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(script_dir))
+out_dir = os.path.join(project_root, "data", "test-videos")
+os.makedirs(out_dir, exist_ok=True)
 out_csv = os.path.join(out_dir, "Antalya_Orman_Ucusu.csv")
 
 # DJI CSV formatı gereği ilk satırda boş/başka bilgiler olabiliyor ama pandas genelde direkt 1. satırdan okur.

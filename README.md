@@ -18,12 +18,24 @@ RGB + termal görüntü füzyonu kullanan yangın/no-fire sınıflandırıcısı
 
 Notebook hücre akışı (Kaggle elle çalıştırma): `scripts/kaggle_notebook_cells_tr.md`.
 
+## Aktif ve legacy kod ayrımı
+
+Aktif ürün akışı `src/`, `scripts/`, `tests/`, `config.py` ve kök `requirements*.txt` dosyalarıdır.
+
+Şu klasörler eski demo/deney kodu olarak tutulur ve ana pipeline için kaynak kabul edilmemelidir:
+
+- `arayuzde-harita-gösterimi/`
+- `model_ile_konumlu_çıktı/`
+- `drone-haberlesmesi/`
+- `project-showcase/`
+
+Bu klasörlerdeki scriptler çalıştırılacaksa ilgili path, DB tablo şeması ve bağımlılıklar ayrıca kontrol edilmelidir.
+
 ## Hızlı başlangıç (yerel)
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\activate
-pip install -r requirements.txt
+conda env create -f environment.yml
+conda activate fire-detection-py311
 
 python src/01_build_master_index.py
 python scripts/check_leakage.py
@@ -46,6 +58,22 @@ Gelişmiş kullanım ve preset’ler: [`NASIL_CALISTIRILIR.md`](NASIL_CALISTIRIL
 | `FLAME_MODELS_DIR` | Örn. `/kaggle/working/models` |
 | `FLAME_MASTER_INDEX` | Örn. `/kaggle/working/data/master_index.parquet` |
 | `FLAME_BINARY_ROOT` | Binary dataset kökü (isteğe bağlı) |
+| `FLAME_INDEX_CSV` | CSV indeks yolu (isteğe bağlı) |
+| `FLAME_CART_ROOT` | CART/alternatif veri kökü (isteğe bağlı) |
+| `POSTGIS_HOST`, `POSTGIS_PORT`, `POSTGIS_DB`, `POSTGIS_USER`, `POSTGIS_PASSWORD` | PostGIS/dashboard bağlantısı |
+| `GEE_PROJECT_ID` | Google Earth Engine proje ID'si (opsiyonel fuel scorer) |
+
+Opsiyonel bağımlılıklar:
+
+```powershell
+pip install -r requirements-postgis.txt      # PostGIS writer/dashboard
+pip install -r requirements-gee.txt          # FuelScorer GEE ozellik cekimi
+pip install -r requirements-dashboard.txt    # Flask demo dashboard
+```
+
+Yerel ayarlar kökteki `.env` dosyasından otomatik okunur. `.env` git'e eklenmez; paylaşılabilir şablon `.env.example` dosyasıdır.
+
+Dashboard popup fotoğraflarını farklı bilgisayarlardan açmak için `.env` içinde `DASHBOARD_FRAME_BASE_URL` değerini dashboard sunucusunun erişilebilir adresine ayarlayın, örn. `http://192.168.1.20:5000/frames`. PostGIS/GeoServer WFS'te doğrudan `overlay_url` attribute'u yayınlamak için `scripts/postgis_dashboard_overlay_url.sql` migration'ını çalıştırın; pipeline yeni kayıtlar için bu kolonu otomatik doldurur.
 
 Tipik sıra:
 
@@ -153,5 +181,5 @@ python -m src.eval.ablation_eval `
 ## Test
 
 ```powershell
-pytest -q
+python -m pytest -q tests
 ```

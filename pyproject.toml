@@ -40,3 +40,7 @@ ignore = [
 "src/inference/__init__.py" = ["F401"]
 "src/data/__init__.py" = ["F401"]
 "src/risk/__init__.py" = ["F401"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

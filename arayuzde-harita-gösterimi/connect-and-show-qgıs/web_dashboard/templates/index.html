@@ -195,66 +195,219 @@
     <!-- Leaflet JS -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
+        const GEOSERVER_WMS_URL = {{ geoserver_wms_url|tojson }};
+        const LAYER_ACTIVE_FIRE = {{ layer_active_fire|tojson }};
+        const LAYER_DRONE_FRAMES = {{ layer_drone_frames|tojson }};
+        const LAYER_FIRE_OBS = {{ layer_fire_obs|tojson }};
+
         // 1. Haritayi Olustur (Dark Mode Basemap)
         const map = L.map('map', {
             zoomControl: false,
-            maxZoom: 19
+            maxZoom: 24
         }).setView([0, 0], 2);
 
         L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-        // OpenStreetMap Altligi
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-            maxZoom: 19
-        }).addTo(map);
-
-        // 2. GeoServer'dan WMS Katmanini Ekle
-        // UYARI: Eger geoserver portu farkliysa (orn 8080) asagidaki linki degistirmelisin
-        const geoserverLayer = L.tileLayer.wms('http://localhost:8081/geoserver/benim_projem/wms', {
-            layers: 'benim_projem:yangin_tahminleri',
-            format: 'image/png',
-            transparent: true,
-            version: '1.1.0',
-            maxZoom: 20
+        // --- Farkli Harita Altliklari (Basemaps) ---
+        const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap',
+            maxZoom: 24,
+            maxNativeZoom: 19
         });
-        geoserverLayer.addTo(map);
 
-        // 3. Etkilesimli Yangin Noktalari (GeoJSON ile)
+        const darkLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; CartoDB',
+            maxZoom: 24,
+            maxNativeZoom: 19
+        });
+
+        const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+            attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
+            maxZoom: 24,
+            maxNativeZoom: 19
+        });
+
+        // Varsayilan olarak Dark Layer acik olsun (Sitenin temasiyla uyumlu)
+        darkLayer.addTo(map);
+
+        // WMS katmanlari icin baslangic parametreleri (Dinamik Boyutlandirma)
+        const initialZoom = map.getZoom();
+        const getEnvString = (zoom) => {
+            let trackSize = Math.max(2, Math.round(zoom * 0.8));
+            let droneSmall = Math.max(2, Math.round(zoom * 0.25));
+            let droneLarge = Math.max(3, Math.round(zoom * 0.35));
+            let heatRad = Math.max(15, Math.round(zoom * 5));
+            return `track_size:${trackSize};drone_size_small:${droneSmall};drone_size_large:${droneLarge};heatmap_radius:${heatRad}`;
+        };
+
+        // --- EN DOĞRU ÇÖZÜM: TEK PARÇA WMS (Double Buffering ile) ---
+        L.SingleWMSOverlay = L.Layer.extend({
+            options: { url: '', layers: '', format: 'image/png', transparent: true, version: '1.1.0', env: '', _t: '' },
+            initialize: function(options) { L.setOptions(this, options); },
+            onAdd: function(map) {
+                this._map = map;
+                this._overlays = []; 
+                
+                // Layer sadece şu eventlerde yenilensin:
+                map.on("moveend", this._update, this);
+                map.on("zoomend", this._update, this);
+                map.on("resize", this._update, this);
+                
+                this._update();
+            },
+            onRemove: function(map) {
+                map.off("moveend", this._update, this);
+                map.off("zoomend", this._update, this);
+                map.off("resize", this._update, this);
+                if (this._updateTimer) clearTimeout(this._updateTimer);
+                this._overlays.forEach(layer => map.removeLayer(layer));
+                this._overlays = [];
+            },
+            _update: function() {
+                // Zoom bittiginde ayni anda hem zoomend hem moveend calisabilir. 
+                // Ust uste binmesini ve Leaflet'in animasyon hatalarini onlemek icin 50ms Debounce (Geciktirici) ekliyoruz
+                if (this._updateTimer) clearTimeout(this._updateTimer);
+                this._updateTimer = setTimeout(() => this._doUpdate(), 50);
+            },
+            _doUpdate: function() {
+                if (!this._map) return;
+                const bounds = this._map.getBounds();
+                const size = this._map.getSize();
+                const crs = this._map.options.crs;
+                const nw = crs.project(bounds.getNorthWest());
+                const se = crs.project(bounds.getSouthEast());
+                const bbox = `${nw.x},${se.y},${se.x},${nw.y}`; 
+                
+                const width = Math.round(size.x);
+                const height = Math.round(size.y);
+                
+                const params = new URLSearchParams({
+                    service: 'WMS',
+                    request: 'GetMap',
+                    version: this.options.version,
+                    layers: this.options.layers,
+                    format: this.options.format,
+                    transparent: String(this.options.transparent),
+                    width: String(width),
+                    height: String(height),
+                    srs: 'EPSG:3857',
+                    bbox: bbox,
+                    env: this.options.env || '',
+                    _t: this.options._t || ''
+                });
+                const url = `${this.options.url}?${params.toString()}`;
+                
+                const newOverlay = L.imageOverlay(url, bounds, {opacity: 1, interactive: false});
+                
+                // Yarış durumunu (Race Condition) onlemek icin bu istegi kaydediyoruz
+                this._currentRequest = newOverlay;
+                
+                newOverlay.on('load', () => {
+                    // Eger araya baska bir kaydirma girdiyse (bu resim eskidiyse), haritaya ekleme!
+                    if (this._currentRequest !== newOverlay) {
+                        if (this._map.hasLayer(newOverlay)) this._map.removeLayer(newOverlay);
+                        return;
+                    }
+                    
+                    this._overlays.forEach(layer => {
+                        if (layer !== newOverlay && this._map.hasLayer(layer)) {
+                            this._map.removeLayer(layer);
+                        }
+                    });
+                    this._overlays = [newOverlay];
+                });
+
+                newOverlay.addTo(this._map);
+                this._overlays.push(newOverlay);
+            },
+            setParams: function(params, noRedraw) {
+                if (params.env) this.options.env = params.env;
+                if (params._t !== undefined) this.options._t = params._t;
+                if (!noRedraw) {
+                    this._update();
+                }
+            }
+        });
+
+        // 2. GeoServer'dan YENI TEK PARCA (Single) WMS Katmanlarini Ekle
+        const activeFireTracksLayer = new L.SingleWMSOverlay({
+            url: GEOSERVER_WMS_URL,
+            layers: LAYER_ACTIVE_FIRE,
+            env: getEnvString(initialZoom)
+        });
+
+        const droneFramePointsLayer = new L.SingleWMSOverlay({
+            url: GEOSERVER_WMS_URL,
+            layers: LAYER_DRONE_FRAMES,
+            env: getEnvString(initialZoom)
+        });
+        droneFramePointsLayer.addTo(map);
+
+        const fireObservationsLayer = new L.SingleWMSOverlay({
+            url: GEOSERVER_WMS_URL,
+            layers: LAYER_FIRE_OBS,
+            env: getEnvString(initialZoom)
+        });
+        fireObservationsLayer.addTo(map);
+
+        // Harita her yakinlasip uzaklastiginda (zoom) WMS boyutlarini guncelle!
+        map.on('zoomend', function () {
+            const newEnv = getEnvString(map.getZoom());
+            activeFireTracksLayer.setParams({ env: newEnv }, false);
+            droneFramePointsLayer.setParams({ env: newEnv }, false);
+            fireObservationsLayer.setParams({ env: newEnv }, false);
+        });
+
+        // 3. Etkilesimli Yangin Noktalari (GeoJSON ile Görünmez Tıklama Alanı)
         let fireGeoJSONLayer = L.geoJSON(null, {
             pointToLayer: function (feature, latlng) {
-                // Kirmizi, parlayan ozel bir marker olustur
-                return L.circleMarker(latlng, {
-                    radius: 8,
-                    fillColor: "#ef4444",
-                    color: "#b91c1c",
-                    weight: 2,
-                    opacity: 1,
-                    fillOpacity: 0.8,
-                    className: 'pulse-marker' // css ile animasyon eklenebilir
+                // GeoJSON noktasini tamamen seffaf (gorunmez) yapiyoruz.
+                // Gorsel olarak GeoServer'in WMS cizimi gorunecek, bu sadece tiklanabilmesi icin arka planda alan yaratacak!
+                return L.circle(latlng, {
+                    radius: 20,
+                    fillColor: "#000000",
+                    color: "#000000",
+                    weight: 0,
+                    opacity: 0,        // TAMAMEN SEFFAF
+                    fillOpacity: 0     // TAMAMEN SEFFAF
                 });
             },
             onEachFeature: function (feature, layer) {
-                // Her nokta icin Hover/Click oldugunda acilacak olan HTML icerigi
                 const props = feature.properties;
-                const imgUrl = props.resim_adi ? `/frames/${props.resim_adi}` : '';
+                const imgUrl = props.image_url || (props.resim_adi ? `/frames/${encodeURIComponent(props.resim_adi)}` : '');
 
                 const popupContent = `
                     <div style="text-align:center; min-width: 220px;">
                         ${imgUrl ? `<img src="${imgUrl}" style="width: 100%; border-radius: 8px; border: 1px solid #334155; margin-bottom: 10px;" alt="Fire Frame">` : '<div style="padding:20px; color:#94a3b8;">Goruntu Yok</div>'}
                         <div style="font-size: 14px;"><strong>Risk Skoru:</strong> %${props.yangin_yuzdesi}</div>
                         <div style="font-size: 12px; color: #94a3b8; margin-top: 5px;">${props.zaman}</div>
+                        <a href="https://www.google.com/maps?q=${feature.geometry.coordinates[1]},${feature.geometry.coordinates[0]}" target="_blank" style="display: block; margin-top: 10px; background: #3b82f6; color: white; padding: 8px; text-decoration: none; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer;">
+                            Google Maps'te Aç
+                        </a>
                     </div>
                 `;
                 layer.bindPopup(popupContent, { maxWidth: 300, className: 'custom-popup' });
-
-                // Fare uzerine gelince otomatik acilsin istersen (Hover):
-                layer.on('mouseover', function (e) {
-                    this.openPopup();
-                });
-                // Tıklanabilir kalsın dersen mouseout eklemeyebilirsin veya ekleyebilirsin
+                // Mouseover kaldirildi, sadece tiklayinca acilacak.
             }
-        }).addTo(map);
+        });
+
+        // "Aktif Yangın Rotaları" secenegini actiginizda hem WMS gorseli gelir hem de gorunmez tiklama alani aktif olur
+        const activeFireGroup = L.layerGroup([activeFireTracksLayer, fireGeoJSONLayer]).addTo(map);
+
+        // --- Katman Kontrol Paneli (Sag Ust Kose) ---
+        const baseMaps = {
+            "Siyah Tema (Dark)": darkLayer,
+            "Uydu Görüntüsü": satelliteLayer,
+            "Standart Harita (OSM)": osmLayer
+        };
+
+        const overlayMaps = {
+            "Aktif Yangın Rotaları": activeFireGroup,
+            "WMS: Drone Kareleri": droneFramePointsLayer,
+            "WMS: Yangın Tespitleri": fireObservationsLayer
+        };
+
+        L.control.layers(baseMaps, overlayMaps, { position: 'topright' }).addTo(map);
 
         // 4. Veritabanindan Istatistikleri ve Dinamik Lokasyonu Cek
         let lastFrameCount = -1;
@@ -277,14 +430,23 @@
                             document.getElementById('val-max').innerText = data.stats.max_yuzde + '%';
 
                             // GeoServer'dan gelen harita resmini tazelemeye zorla (Sari/Normal noktalar icin)
-                            geoserverLayer.setParams({ _t: Date.now() }, false);
+                            const t = Date.now();
+                            activeFireTracksLayer.setParams({ _t: t }, false);
+                            droneFramePointsLayer.setParams({ _t: t }, false);
+                            fireObservationsLayer.setParams({ _t: t }, false);
 
                             // Etkilesimli Yangin resimlerini getir
                             fetch('/api/fire-points')
                                 .then(r => r.json())
                                 .then(geojson => {
+                                    if (geojson.status === 'error' || geojson.type !== 'FeatureCollection') {
+                                        throw new Error(geojson.message || 'Invalid GeoServer WFS response');
+                                    }
                                     fireGeoJSONLayer.clearLayers();
                                     fireGeoJSONLayer.addData(geojson);
+                                })
+                                .catch(err => {
+                                    console.error("Fire point WFS error:", err);
                                 });
 
                             // Haritayi ilk yuklemede noktalara odaklar
@@ -296,6 +458,8 @@
                         }
                     } else {
                         console.error("Veri alinamadi:", data.message);
+                        document.getElementById('loader').style.display = 'block';
+                        document.getElementById('loader').innerText = data.message || "GeoServer baglanti hatasi!";
                     }
                 })
                 .catch(err => {

@@ -25,12 +25,14 @@ from segmentation.thermal_threshold import create_fire_mask_from_thermal
 from segmentation.contours import extract_fire_regions
 from segmentation.temporal_smoothing import TemporalMaskSmoother
 from segmentation.mask_filter import filter_fire_regions
+from segmentation.region_merge import merge_close_fire_regions
 from segmentation.visualization import (
     overlay_mask_on_frame,
     draw_fire_regions_on_frame
 )
 
 from telemetry_provider import DjiCsvTelemetryProvider
+from risk.fuel_scorer import FuelScorer
 
 
 def ensure_dir(path):
@@ -80,14 +82,28 @@ def main():
     parser.add_argument(
         "--percentile",
         type=float,
-        default=95,
+        default=97,
         help="Thermal mask percentile threshold"
+    )
+
+    parser.add_argument(
+        "--threshold_mode",
+        choices=["fixed", "absolute", "percentile", "hybrid"],
+        default="hybrid",
+        help="Thermal mask thresholding mode"
+    )
+
+    parser.add_argument(
+        "--threshold_value",
+        type=float,
+        default=210,
+        help="Raw thermal/grayscale threshold used by fixed/absolute/hybrid modes"
     )
 
     parser.add_argument(
         "--min_area",
         type=int,
-        default=150,
+        default=300,
         help="Minimum fire region area in pixels"
     )
 
@@ -109,8 +125,14 @@ def main():
     ensure_dir(fire_frames_dir)
     ensure_dir(overlays_dir)
     ensure_dir(masks_dir)
+    ensure_dir(overlays_dir)
 
+    print("Loading Dual Branch Model...")
     model, meta = load_dual_branch_model(args.checkpoint)
+
+    print("Loading Fuel Scorer (Plant Model)...")
+    fuel_model_path = str(Path(__file__).parent / "models" / "fuel_scorer_model.pkl")
+    fuel_scorer = FuelScorer(model_path=fuel_model_path, use_gee=True)
 
     print("Model loaded.")
     print("Device:", meta["device"])
@@ -206,11 +228,30 @@ def main():
             device=meta["device"]
         )
 
-        fire_prob = predict_fire_probability(
+        fire_prob_raw = predict_fire_probability(
             model=model,
             input_tensor=input_tensor,
             temperature=meta["temperature"]
         )
+
+        video_time_s = frame_idx / fps
+        telemetry_info = {}
+        lat = None
+        lon = None
+        if telemetry_provider is not None:
+            telemetry_info = telemetry_provider.get_current(video_time_s)
+            lat = telemetry_info.get("latitude")
+            lon = telemetry_info.get("longitude")
+
+        fuel_score = 0.50
+        if lat is not None and lon is not None:
+            fuel_score = fuel_scorer.get_score(lat, lon)
+        
+        MAX_ETKI = 0.05
+        modifiye_deger = ((fuel_score - 0.50) / 0.50) * MAX_ETKI
+        
+        # Final birleşik olasılık
+        fire_prob = max(0.0, min(1.0, fire_prob_raw + modifiye_deger))
 
         is_fire = fire_prob >= meta["threshold"]
         video_time_s = frame_idx / fps
@@ -218,13 +259,16 @@ def main():
         base_result = {
             "frame_idx": frame_idx,
             "video_time_s": video_time_s,
+            "kamera_prob": fire_prob_raw,
+            "fuel_score": fuel_score,
             "fire_probability": fire_prob,
+            "decision_prob": fire_prob,
             "threshold": meta["threshold"],
-            "prediction": "fire" if is_fire else "no_fire"
+            "prediction": "fire" if is_fire else "no_fire",
+            "pred_fire": 1 if is_fire else 0,
         }
 
         if telemetry_provider is not None:
-            telemetry_info = telemetry_provider.get_current(video_time_s)
             base_result.update(telemetry_info)
 
         if postgis_writer is not None:
@@ -232,16 +276,20 @@ def main():
 
         print(
             f"Frame {frame_idx} | time={video_time_s:.2f}s | "
-            f"prob={fire_prob:.4f} | pred={base_result['prediction']}"
+            f"Kamera={fire_prob_raw:.4f} | Bitki={fuel_score:.4f} | "
+            f"Final={fire_prob:.4f} | pred={base_result['prediction']}"
         )
 
         if is_fire:
             raw_mask, thermal_norm = create_fire_mask_from_thermal(
                 thermal_frame,
-                threshold_mode="percentile",
+                threshold_mode=args.threshold_mode,
+                threshold_value=args.threshold_value,
                 percentile_value=args.percentile,
                 min_area=args.min_area,
-                use_strong_closing=True
+                kernel_size=9,
+                use_strong_closing=False,
+                dilate_iterations=0
             )
 
             raw_mask_pixels = int((raw_mask > 0).sum())
@@ -257,6 +305,16 @@ def main():
 
             raw_region_count = len(fire_regions)
 
+            # Yakın yangın parçalarını birleştir.
+            # Küçük yangınları silmez; sadece yakın olanları tek bölge yapar.
+            fire_regions = merge_close_fire_regions(
+                fire_regions,
+                image_shape=mask.shape,
+                merge_distance_px=50
+            )
+
+            merged_region_count = len(fire_regions)
+
             fire_regions = filter_fire_regions(
                 fire_regions,
                 image_shape=mask.shape,
@@ -270,6 +328,7 @@ def main():
                 f"  Raw mask pixels: {raw_mask_pixels} | "
                 f"Stable mask pixels: {stable_mask_pixels} | "
                 f"Raw regions: {raw_region_count} | "
+                f"Merged regions: {merged_region_count} | "
                 f"Filtered regions: {len(fire_regions)}"
             )
 

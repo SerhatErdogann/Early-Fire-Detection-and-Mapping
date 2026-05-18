@@ -13,7 +13,7 @@ class TemporalMaskSmoother:
     - Aynı bölgede birkaç frame boyunca görünen sıcak alanları korumak
     """
 
-    def __init__(self, history_size=5, vote_threshold=0.4):
+    def __init__(self, history_size=5, vote_threshold=0.4, min_history=2):
         """
         history_size:
             Kaç maskenin hafızada tutulacağı.
@@ -31,6 +31,7 @@ class TemporalMaskSmoother:
 
         self.history_size = history_size
         self.vote_threshold = vote_threshold
+        self.min_history = max(1, int(min_history))
         self.mask_history = deque(maxlen=history_size)
 
     def reset(self):
@@ -49,6 +50,9 @@ class TemporalMaskSmoother:
         binary_mask = (mask > 0).astype(np.float32)
 
         self.mask_history.append(binary_mask)
+
+        if len(self.mask_history) < self.min_history:
+            return np.zeros_like(mask, dtype=np.uint8)
 
         stacked = np.stack(list(self.mask_history), axis=0)
 

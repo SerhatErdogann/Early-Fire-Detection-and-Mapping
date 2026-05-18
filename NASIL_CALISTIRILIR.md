@@ -1,5 +1,7 @@
 # Nasıl Çalıştırılır?
 
+Güncel aktif akış için önce `README.md` dosyasındaki conda ortamı ve aktif/legacy ayrımını takip edin. Bu dosyada eski demo komutları da bulunabilir; ana kaynak `src/`, `scripts/`, `tests/` ve kök `requirements*.txt` dosyalarıdır.
+
 Tüm komutları **proje klasörünün içinden** (flame_fire_project) çalıştırın.
 
 ---

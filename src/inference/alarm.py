@@ -63,6 +63,23 @@ class AlarmStateMachine:
         if spatial_support:
             reasons.append("spatial_support")
 
+        if self.state == ALARM_COOLDOWN:
+            if p >= self.cfg.high_threshold:
+                self._cooldown_left = 0
+            else:
+                self._cooldown_left = max(0, self._cooldown_left - 1)
+                self.state = ALARM_COOLDOWN if self._cooldown_left > 0 else ALARM_IDLE
+                reasons.append("cooldown")
+                reason = "|".join(reasons) if reasons else "cooldown"
+                return self.state, 0, float(p), reason
+
+        if self.state == ALARM_CONFIRMED and p < self.cfg.low_threshold:
+            self._high_run = 0
+            self._cooldown_left = max(1, int(self.cfg.cooldown_frames))
+            self.state = ALARM_COOLDOWN
+            reasons.append("cooldown")
+            return self.state, 0, float(p), "|".join(reasons)
+
         # persistence counter (strict consecutive high)
         if p >= self.cfg.high_threshold:
             self._high_run += 1
