@@ -3,14 +3,6 @@
   "WorkspaceRootPath": "C:\\Users\\DELL\\Desktop\\Projeler\\Early-Fire-Detection-and-Mapping\\",
   "Documents": [
     {
-      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\DELL\\Desktop\\Projeler\\Early-Fire-Detection-and-Mapping\\outputs\\live_video_results\\overlays\\frame_000010_thermal_overlay.png||{177559E0-D141-11D0-92DF-00A0C9138C45}",
-      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:outputs\\live_video_results\\overlays\\frame_000010_thermal_overlay.png||{177559E0-D141-11D0-92DF-00A0C9138C45}"
-    },
-    {
-      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\DELL\\Desktop\\Projeler\\Early-Fire-Detection-and-Mapping\\src\\live_video_fire_pipeline.py||{3B902123-F8A7-4915-9F01-361F908088D0}",
-      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:src\\live_video_fire_pipeline.py||{3B902123-F8A7-4915-9F01-361F908088D0}"
-    },
-    {
       "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\DELL\\Desktop\\Projeler\\Early-Fire-Detection-and-Mapping\\scripts\\check_leakage.py||{3B902123-F8A7-4915-9F01-361F908088D0}",
       "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:scripts\\check_leakage.py||{3B902123-F8A7-4915-9F01-361F908088D0}"
     },
@@ -43,31 +35,6 @@
             {
               "$type": "Document",
               "DocumentIndex": 0,
-              "Title": "frame_000010_thermal_overlay.png - PNG [1920x1080, 24 bit, PNG]",
-              "DocumentMoniker": "C:\\Users\\DELL\\Desktop\\Projeler\\Early-Fire-Detection-and-Mapping\\outputs\\live_video_results\\overlays\\frame_000010_thermal_overlay.png",
-              "RelativeDocumentMoniker": "outputs\\live_video_results\\overlays\\frame_000010_thermal_overlay.png",
-              "ToolTip": "C:\\Users\\DELL\\Desktop\\Projeler\\Early-Fire-Detection-and-Mapping\\outputs\\live_video_results\\overlays\\frame_000010_thermal_overlay.png - PNG [1920x1080, 24 bit, PNG]",
-              "RelativeToolTip": "outputs\\live_video_results\\overlays\\frame_000010_thermal_overlay.png - PNG [1920x1080, 24 bit, PNG]",
-              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001533|",
-              "WhenOpened": "2026-05-18T22:17:41.922Z",
-              "EditorCaption": " - PNG [1920x1080, 24 bit, PNG]"
-            },
-            {
-              "$type": "Document",
-              "DocumentIndex": 1,
-              "Title": "live_video_fire_pipeline.py",
-              "DocumentMoniker": "C:\\Users\\DELL\\Desktop\\Projeler\\Early-Fire-Detection-and-Mapping\\src\\live_video_fire_pipeline.py",
-              "RelativeDocumentMoniker": "src\\live_video_fire_pipeline.py",
-              "ToolTip": "C:\\Users\\DELL\\Desktop\\Projeler\\Early-Fire-Detection-and-Mapping\\src\\live_video_fire_pipeline.py",
-              "RelativeToolTip": "src\\live_video_fire_pipeline.py",
-              "ViewState": "AgIAABEBAAAAAAAAAAArwCMBAAAqAAAAAAAAAA==",
-              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.002457|",
-              "WhenOpened": "2026-05-18T22:14:21.076Z",
-              "EditorCaption": ""
-            },
-            {
-              "$type": "Document",
-              "DocumentIndex": 2,
               "Title": "check_leakage.py",
               "DocumentMoniker": "C:\\Users\\DELL\\Desktop\\Projeler\\Early-Fire-Detection-and-Mapping\\scripts\\check_leakage.py",
               "RelativeDocumentMoniker": "scripts\\check_leakage.py",
@@ -80,7 +47,7 @@
             },
             {
               "$type": "Document",
-              "DocumentIndex": 3,
+              "DocumentIndex": 1,
               "Title": "script.js",
               "DocumentMoniker": "C:\\Users\\DELL\\Desktop\\Projeler\\Early-Fire-Detection-and-Mapping\\project-showcase\\script.js",
               "RelativeDocumentMoniker": "project-showcase\\script.js",
@@ -88,7 +55,8 @@
               "RelativeToolTip": "project-showcase\\script.js",
               "ViewState": "AgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001646|",
-              "WhenOpened": "2026-05-18T16:09:09.997Z"
+              "WhenOpened": "2026-05-18T16:09:09.997Z",
+              "EditorCaption": ""
             }
           ]
         }

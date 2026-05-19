@@ -18,7 +18,7 @@ from geospatial.pixel_projection import (
     estimate_area_from_pixel_area
 )
 
-from geospatial.fire_tracker import FireTracker
+from geospatial.fire_tracker import FireTracker, haversine_distance_m
 from postgis_writer import PostgisWriter
 
 from segmentation.thermal_threshold import create_fire_mask_from_thermal
@@ -96,14 +96,14 @@ def main():
     parser.add_argument(
         "--threshold_value",
         type=float,
-        default=210,
+        default=180,
         help="Raw thermal/grayscale threshold used by fixed/absolute/hybrid modes"
     )
 
     parser.add_argument(
         "--min_area",
         type=int,
-        default=300,
+        default=130,
         help="Minimum fire region area in pixels"
     )
 
@@ -200,9 +200,14 @@ def main():
     )
 
     fire_tracker = FireTracker(
-        match_distance_m=80.0,
+        match_distance_m=40.0,
         max_missing_frames=60
     )
+
+    track_alert_cooldown = {}
+    ALERT_LOCATION_HISTORY = []
+    ALERT_COOLDOWN_FRAMES = 15
+    ALERT_MIN_DISTANCE_M = 40
 
     processed_count = 0
     frame_idx = 0
@@ -287,7 +292,7 @@ def main():
                 threshold_value=args.threshold_value,
                 percentile_value=args.percentile,
                 min_area=args.min_area,
-                kernel_size=9,
+                kernel_size=5,
                 use_strong_closing=False,
                 dilate_iterations=0
             )
@@ -332,48 +337,28 @@ def main():
                 f"Filtered regions: {len(fire_regions)}"
             )
 
-            thermal_bgr = cv2.cvtColor(thermal_norm, cv2.COLOR_GRAY2BGR)
-
-            thermal_overlay = overlay_mask_on_frame(thermal_bgr, mask)
-            thermal_contours = draw_fire_regions_on_frame(
-                thermal_overlay,
-                fire_regions
-            )
-
-            frame_name = f"frame_{frame_idx:06d}"
-
-            fire_frame_path = fire_frames_dir / f"{frame_name}.jpg"
-            mask_path = masks_dir / f"{frame_name}_mask.png"
-            overlay_path = overlays_dir / f"{frame_name}_thermal_overlay.png"
-
-            cv2.imwrite(str(fire_frame_path), thermal_bgr)
-            cv2.imwrite(str(mask_path), mask)
-            cv2.imwrite(str(overlay_path), thermal_contours)
-
             if len(fire_regions) == 0:
-                result = base_result.copy()
-                result.update({
-                    "region_id": None,
-                    "pixel_area": 0,
-                    "centroid_x": None,
-                    "centroid_y": None,
-                    "bbox_x": None,
-                    "bbox_y": None,
-                    "bbox_width": None,
-                    "bbox_height": None,
-                    "fire_frame_path": str(fire_frame_path),
-                    "mask_path": str(mask_path),
-                    "overlay_path": str(overlay_path),
-                    "fire_latitude": None,
-                    "fire_longitude": None,
-                    "approx_area_m2": None,
-                    "area_method": None,
-                    "fire_track_id": None
-                })
-
-                results.append(result)
-
+                print(f"  SKIPPED: Model said fire but no valid regions found")
+                results.append(base_result)
             else:
+                thermal_bgr = cv2.cvtColor(thermal_norm, cv2.COLOR_GRAY2BGR)
+
+                thermal_overlay = overlay_mask_on_frame(thermal_bgr, mask)
+                thermal_contours = draw_fire_regions_on_frame(
+                    thermal_overlay,
+                    fire_regions
+                )
+
+                frame_name = f"frame_{frame_idx:06d}"
+
+                fire_frame_path = fire_frames_dir / f"{frame_name}.jpg"
+                mask_path = masks_dir / f"{frame_name}_mask.png"
+                overlay_path = overlays_dir / f"{frame_name}_thermal_overlay.png"
+
+                cv2.imwrite(str(fire_frame_path), thermal_bgr)
+                cv2.imwrite(str(mask_path), mask)
+                cv2.imwrite(str(overlay_path), thermal_contours)
+
                 image_height, image_width = mask.shape[:2]
 
                 for region in fire_regions:
@@ -407,12 +392,27 @@ def main():
                             vertical_fov_deg=53.1
                         )
 
-                        fire_track_id = fire_tracker.update(
+                        fire_track_id, best_lat, best_lon = fire_tracker.update(
                             fire_lat=fire_lat,
                             fire_lon=fire_lon,
                             frame_idx=frame_idx,
-                            approx_area_m2=approx_area_m2
+                            approx_area_m2=approx_area_m2,
+                            fire_probability=fire_prob
                         )
+
+                    should_alert = True
+                    if fire_lat is not None and fire_lon is not None:
+                        for prev in ALERT_LOCATION_HISTORY:
+                            dist = haversine_distance_m(fire_lat, fire_lon, prev["lat"], prev["lon"])
+                            if dist < ALERT_MIN_DISTANCE_M and (frame_idx - prev["frame"]) < ALERT_COOLDOWN_FRAMES:
+                                should_alert = False
+                                break
+                    if should_alert:
+                        ALERT_LOCATION_HISTORY.append({"lat": fire_lat, "lon": fire_lon, "frame": frame_idx})
+                        ALERT_LOCATION_HISTORY[:] = [
+                            x for x in ALERT_LOCATION_HISTORY
+                            if (frame_idx - x["frame"]) < ALERT_COOLDOWN_FRAMES
+                        ]
 
                     result = base_result.copy()
                     result.update({
@@ -429,12 +429,15 @@ def main():
                         "overlay_path": str(overlay_path),
                         "fire_latitude": fire_lat,
                         "fire_longitude": fire_lon,
+                        "track_best_latitude": best_lat,
+                        "track_best_longitude": best_lon,
                         "approx_area_m2": approx_area_m2,
                         "area_method": "centroid_gsd_fov_altitude",
-                        "fire_track_id": fire_track_id
+                        "fire_track_id": fire_track_id,
+                        "alerted": should_alert
                     })
 
-                    if postgis_writer is not None:
+                    if postgis_writer is not None and should_alert:
                         postgis_writer.insert_fire_observation(result)
                         postgis_writer.upsert_active_fire_track(result)
 

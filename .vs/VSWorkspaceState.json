@@ -1,9 +1,13 @@
 {
   "ExpandedNodes": [
     "",
+    "\\outputs",
+    "\\outputs\\live_video_results",
+    "\\outputs\\live_video_results\\overlays",
     "\\project-showcase",
-    "\\scripts"
+    "\\scripts",
+    "\\src"
   ],
-  "SelectedNode": "\\scripts\\check_leakage.py",
+  "SelectedNode": "\\outputs\\live_video_results\\overlays\\frame_000010_thermal_overlay.png",
   "PreviewInSolutionExplorer": false
 }

@@ -197,8 +197,8 @@
     <script>
         const GEOSERVER_WMS_URL = {{ geoserver_wms_url|tojson }};
         const LAYER_ACTIVE_FIRE = {{ layer_active_fire|tojson }};
-        const LAYER_DRONE_FRAMES = {{ layer_drone_frames|tojson }};
-        const LAYER_FIRE_OBS = {{ layer_fire_obs|tojson }};
+        const LAYER_DRONE_PATH = {{ layer_drone_path|tojson }};
+        const LAYER_FIRE_HEATMAP = {{ layer_fire_heatmap|tojson }};
 
         // 1. Haritayi Olustur (Dark Mode Basemap)
         const map = L.map('map', {
@@ -329,33 +329,39 @@
             }
         });
 
-        // 2. GeoServer'dan YENI TEK PARCA (Single) WMS Katmanlarini Ekle
+        // 2. GeoServer'dan Yeni Katmanlari Ekle
+        
+        // A. Drone Yolu (Mavi Kesikli Çizgi)
+        const dronePathLayer = new L.SingleWMSOverlay({
+            url: GEOSERVER_WMS_URL,
+            layers: LAYER_DRONE_PATH,
+            env: getEnvString(initialZoom),
+            styles: 'drone_path_line'
+        });
+
+        // B. Yangın Isı Haritası (Arka Plan) - Varsayılan KAPALI
+        const fireHeatmapLayer = new L.SingleWMSOverlay({
+            url: GEOSERVER_WMS_URL,
+            layers: LAYER_FIRE_HEATMAP,
+            env: getEnvString(initialZoom),
+            styles: 'fire_heatmap'
+        });
+
+        // C. Aktif Yangın Noktaları (Kırmızı Daireler)
         const activeFireTracksLayer = new L.SingleWMSOverlay({
             url: GEOSERVER_WMS_URL,
             layers: LAYER_ACTIVE_FIRE,
-            env: getEnvString(initialZoom)
+            env: getEnvString(initialZoom),
+            styles: 'active_fire_tracks_style'
         });
-
-        const droneFramePointsLayer = new L.SingleWMSOverlay({
-            url: GEOSERVER_WMS_URL,
-            layers: LAYER_DRONE_FRAMES,
-            env: getEnvString(initialZoom)
-        });
-        droneFramePointsLayer.addTo(map);
-
-        const fireObservationsLayer = new L.SingleWMSOverlay({
-            url: GEOSERVER_WMS_URL,
-            layers: LAYER_FIRE_OBS,
-            env: getEnvString(initialZoom)
-        });
-        fireObservationsLayer.addTo(map);
+        activeFireTracksLayer.addTo(map);
 
         // Harita her yakinlasip uzaklastiginda (zoom) WMS boyutlarini guncelle!
         map.on('zoomend', function () {
             const newEnv = getEnvString(map.getZoom());
+            dronePathLayer.setParams({ env: newEnv }, false);
+            fireHeatmapLayer.setParams({ env: newEnv }, false);
             activeFireTracksLayer.setParams({ env: newEnv }, false);
-            droneFramePointsLayer.setParams({ env: newEnv }, false);
-            fireObservationsLayer.setParams({ env: newEnv }, false);
         });
 
         // 3. Etkilesimli Yangin Noktalari (GeoJSON ile Görünmez Tıklama Alanı)
@@ -391,7 +397,7 @@
             }
         });
 
-        // "Aktif Yangın Rotaları" secenegini actiginizda hem WMS gorseli gelir hem de gorunmez tiklama alani aktif olur
+        // "Yangın Noktaları" secenegini actiginizda hem WMS gorseli hem de gorunmez tiklama alani aktif olur
         const activeFireGroup = L.layerGroup([activeFireTracksLayer, fireGeoJSONLayer]).addTo(map);
 
         // --- Katman Kontrol Paneli (Sag Ust Kose) ---
@@ -402,9 +408,9 @@
         };
 
         const overlayMaps = {
-            "Aktif Yangın Rotaları": activeFireGroup,
-            "WMS: Drone Kareleri": droneFramePointsLayer,
-            "WMS: Yangın Tespitleri": fireObservationsLayer
+            "Drone Yolu": dronePathLayer,
+            "Yangın Noktaları": activeFireGroup,
+            "Yangın Heatmap": fireHeatmapLayer
         };
 
         L.control.layers(baseMaps, overlayMaps, { position: 'topright' }).addTo(map);
@@ -429,11 +435,11 @@
                             document.getElementById('val-fire').innerText = data.stats.yangin;
                             document.getElementById('val-max').innerText = data.stats.max_yuzde + '%';
 
-                            // GeoServer'dan gelen harita resmini tazelemeye zorla (Sari/Normal noktalar icin)
+                            // GeoServer'dan gelen harita resmini tazelemeye zorla
                             const t = Date.now();
+                            dronePathLayer.setParams({ _t: t }, false);
+                            fireHeatmapLayer.setParams({ _t: t }, false);
                             activeFireTracksLayer.setParams({ _t: t }, false);
-                            droneFramePointsLayer.setParams({ _t: t }, false);
-                            fireObservationsLayer.setParams({ _t: t }, false);
 
                             // Etkilesimli Yangin resimlerini getir
                             fetch('/api/fire-points')

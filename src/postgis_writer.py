@@ -40,6 +40,8 @@ class PostgisWriter:
         statements = [
             "ALTER TABLE IF EXISTS fire_observations ADD COLUMN IF NOT EXISTS overlay_url TEXT;",
             "ALTER TABLE IF EXISTS active_fire_tracks ADD COLUMN IF NOT EXISTS overlay_url TEXT;",
+            "ALTER TABLE IF EXISTS active_fire_tracks ADD COLUMN IF NOT EXISTS track_best_latitude DOUBLE PRECISION;",
+            "ALTER TABLE IF EXISTS active_fire_tracks ADD COLUMN IF NOT EXISTS track_best_longitude DOUBLE PRECISION;",
         ]
         with self.conn.cursor() as cur:
             for sql in statements:
@@ -202,12 +204,13 @@ class PostgisWriter:
     def upsert_active_fire_track(self, result):
         """
         Aynı fire_track_id varsa günceller.
+        Konum olarak track'in en şiddetli gözlem pozisyonu kullanılır.
         Yoksa yeni aktif yangın kaydı açar.
         """
 
         fire_track_id = result.get("fire_track_id")
-        fire_latitude = result.get("fire_latitude")
-        fire_longitude = result.get("fire_longitude")
+        fire_latitude = result.get("track_best_latitude") or result.get("fire_latitude")
+        fire_longitude = result.get("track_best_longitude") or result.get("fire_longitude")
 
         if fire_track_id is None or fire_latitude is None or fire_longitude is None:
             return
@@ -224,6 +227,8 @@ class PostgisWriter:
             last_probability,
             latitude,
             longitude,
+            track_best_latitude,
+            track_best_longitude,
             overlay_path,
             overlay_url,
             simulated,
@@ -234,6 +239,7 @@ class PostgisWriter:
             %s, %s, %s, %s,
             1,
             %s, %s, %s,
+            %s, %s,
             %s, %s,
             %s,
             %s,
@@ -253,6 +259,8 @@ class PostgisWriter:
             last_probability = EXCLUDED.last_probability,
             latitude = EXCLUDED.latitude,
             longitude = EXCLUDED.longitude,
+            track_best_latitude = EXCLUDED.track_best_latitude,
+            track_best_longitude = EXCLUDED.track_best_longitude,
             overlay_path = EXCLUDED.overlay_path,
             overlay_url = EXCLUDED.overlay_url,
             simulated = EXCLUDED.simulated,
@@ -273,6 +281,8 @@ class PostgisWriter:
             result.get("fire_probability"),
             fire_latitude,
             fire_longitude,
+            result.get("track_best_latitude"),
+            result.get("track_best_longitude"),
             result.get("overlay_path"),
             self._overlay_url(result),
             result.get("simulated", True),

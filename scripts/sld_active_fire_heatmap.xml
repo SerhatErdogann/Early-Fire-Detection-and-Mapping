@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<StyledLayerDescriptor version="1.0.0"
+    xmlns="http://www.opengis.net/sld"
+    xmlns:ogc="http://www.opengis.net/ogc"
+    xmlns:xlink="http://www.w3.org/1999/xlink"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.opengis.net/sld http://schemas.opengis.net/sld/1.0.0/StyledLayerDescriptor.xsd">
+
+    <NamedLayer>
+        <Name>active_fire_tracks_style</Name>
+        <UserStyle>
+            <Title>Active Fire Tracks Heatmap</Title>
+            <FeatureTypeStyle>
+                <Rule>
+                    <Name>fire_heatmap</Name>
+                    <Title>Fire Heatmap</Title>
+                    <PointSymbolizer>
+                        <Graphic>
+                            <Mark>
+                                <WellKnownName>circle</WellKnownName>
+                                <Fill>
+                                    <CssParameter name="fill">#FF0000</CssParameter>
+                                    <CssParameter name="fill-opacity">0.35</CssParameter>
+                                </Fill>
+                                <Stroke>
+                                    <CssParameter name="stroke">#FF4500</CssParameter>
+                                    <CssParameter name="stroke-width">1</CssParameter>
+                                    <CssParameter name="stroke-opacity">0.5</CssParameter>
+                                </Stroke>
+                            </Mark>
+                            <Size>
+                                <ogc:Function name="env">
+                                    <ogc:Literal>track_size</ogc:Literal>
+                                    <ogc:Literal>24</ogc:Literal>
+                                </ogc:Function>
+                            </Size>
+                        </Graphic>
+                    </PointSymbolizer>
+                </Rule>
+            </FeatureTypeStyle>
+        </UserStyle>
+    </NamedLayer>
+</StyledLayerDescriptor>

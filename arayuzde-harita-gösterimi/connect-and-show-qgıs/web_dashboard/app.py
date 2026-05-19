@@ -28,8 +28,8 @@ GEOSERVER_WMS_URL = os.getenv(
     f"{GEOSERVER_URL}/{GEOSERVER_WORKSPACE}/wms",
 )
 LAYER_ACTIVE_FIRE = os.getenv("GEOSERVER_LAYER_ACTIVE_FIRE", f"{GEOSERVER_WORKSPACE}:active_fire_tracks")
-LAYER_DRONE_FRAMES = os.getenv("GEOSERVER_LAYER_DRONE_FRAMES", f"{GEOSERVER_WORKSPACE}:drone_frame_points")
-LAYER_FIRE_OBS = os.getenv("GEOSERVER_LAYER_FIRE_OBS", f"{GEOSERVER_WORKSPACE}:fire_observations")
+LAYER_DRONE_PATH = os.getenv("GEOSERVER_LAYER_DRONE_PATH", f"{GEOSERVER_WORKSPACE}:drone_flight_path")
+LAYER_FIRE_HEATMAP = os.getenv("GEOSERVER_LAYER_FIRE_HEATMAP", f"{GEOSERVER_WORKSPACE}:active_fire_tracks")
 GEOSERVER_TIMEOUT_S = float(os.getenv("GEOSERVER_TIMEOUT_S", "5"))
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DASHBOARD_FRAME_BASE_URL = os.getenv("DASHBOARD_FRAME_BASE_URL", "").rstrip("/")
@@ -46,6 +46,12 @@ def _wfs_features(type_name: str) -> list[dict]:
     }
     response = requests.get(url, params=params, timeout=GEOSERVER_TIMEOUT_S)
     response.raise_for_status()
+    
+    # GeoServer bazen hata durumunda JSON yerine HTML döner
+    if not response.text.strip().startswith("{"):
+        print(f"GeoServer WFS Error for {type_name}: {response.text[:200]}")
+        return []
+        
     payload = response.json()
     return payload.get("features") or []
 
@@ -138,29 +144,29 @@ def index():
         "index.html",
         geoserver_wms_url=GEOSERVER_WMS_URL,
         layer_active_fire=LAYER_ACTIVE_FIRE,
-        layer_drone_frames=LAYER_DRONE_FRAMES,
-        layer_fire_obs=LAYER_FIRE_OBS,
+        layer_drone_path=LAYER_DRONE_PATH,
+        layer_fire_heatmap=LAYER_FIRE_HEATMAP,
     )
 
 
 @app.route("/api/stats")
 def stats():
     try:
-        features = _wfs_features(LAYER_DRONE_FRAMES)
+        # Drone path is a line, so we use active_fire_tracks for stats
+        features = _wfs_features(LAYER_ACTIVE_FIRE)
     except Exception as exc:
+        print(f"[STATS ERROR] {exc}")
         return jsonify({"status": "error", "message": f"GeoServer WFS error: {exc}"})
 
     total = len(features)
-    fire_count = 0
+    fire_count = total  # All tracks are fires
     max_prob = 0.0
     points = []
 
     for feature in features:
         properties = feature.get("properties") or {}
-        if _is_fire_frame(properties):
-            fire_count += 1
-
-        prob = _float_or_none(_prop(properties, "fire_probability", "decision_prob", "last_probability"))
+        
+        prob = _float_or_none(_prop(properties, "last_probability", "fire_probability", "decision_prob"))
         if prob is not None:
             max_prob = max(max_prob, prob)
 

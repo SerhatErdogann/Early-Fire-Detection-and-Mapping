@@ -29,6 +29,7 @@ def haversine_distance_m(lat1, lon1, lat2, lon2):
 class FireTracker:
     """
     Arka arkaya gelen frame'lerde aynı yangın odaklarını tek track altında toplar.
+    Konum olarak en şiddetli (en büyük alan) gözlem kullanılır.
     """
 
     def __init__(self, match_distance_m=25.0, max_missing_frames=10):
@@ -37,13 +38,15 @@ class FireTracker:
         self.tracks = {}
         self.next_id = 1
 
-    def update(self, fire_lat, fire_lon, frame_idx, approx_area_m2=None):
+    def update(self, fire_lat, fire_lon, frame_idx, approx_area_m2=None, fire_probability=None):
         """
         Yeni fire point'i mevcut track ile eşleştirir veya yeni track açar.
+        Konum olarak en büyük alana sahip gözlem saklanır.
+        Returns: (track_id, best_lat, best_lon)
         """
 
         if fire_lat is None or fire_lon is None:
-            return None
+            return None, None, None
 
         best_track_id = None
         best_distance = None
@@ -78,26 +81,28 @@ class FireTracker:
                 "last_frame_idx": frame_idx,
                 "observations": 1,
                 "max_area_m2": approx_area_m2,
-                "last_area_m2": approx_area_m2
+                "last_area_m2": approx_area_m2,
+                "max_probability": fire_probability,
+                "last_probability": fire_probability
             }
 
-            return track_id
+            return track_id, fire_lat, fire_lon
 
         track = self.tracks[best_track_id]
 
-        # Konumu hafif yumuşatarak güncelle
-        alpha = 0.7
-        track["latitude"] = alpha * track["latitude"] + (1 - alpha) * fire_lat
-        track["longitude"] = alpha * track["longitude"] + (1 - alpha) * fire_lon
+        # En şiddetli gözlem konumunu koru (en büyük alan)
+        if approx_area_m2 is not None and (track["max_area_m2"] is None or approx_area_m2 > track["max_area_m2"]):
+            track["latitude"] = fire_lat
+            track["longitude"] = fire_lon
+            track["max_area_m2"] = approx_area_m2
 
         track["last_frame_idx"] = frame_idx
         track["observations"] += 1
         track["last_area_m2"] = approx_area_m2
+        track["last_probability"] = fire_probability
 
-        if approx_area_m2 is not None:
-            if track["max_area_m2"] is None:
-                track["max_area_m2"] = approx_area_m2
-            else:
-                track["max_area_m2"] = max(track["max_area_m2"], approx_area_m2)
+        if fire_probability is not None:
+            if track["max_probability"] is None or fire_probability > track["max_probability"]:
+                track["max_probability"] = fire_probability
 
-        return best_track_id
+        return best_track_id, track["latitude"], track["longitude"]

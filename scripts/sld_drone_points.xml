@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<StyledLayerDescriptor version="1.0.0"
+    xmlns="http://www.opengis.net/sld"
+    xmlns:ogc="http://www.opengis.net/ogc"
+    xmlns:xlink="http://www.w3.org/1999/xlink"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.opengis.net/sld http://schemas.opengis.net/sld/1.0.0/StyledLayerDescriptor.xsd">
+
+    <NamedLayer>
+        <Name>drone_frame_points_style</Name>
+        <UserStyle>
+            <Title>Drone Frame Points</Title>
+            <FeatureTypeStyle>
+                <Rule>
+                    <Name>flight_path</Name>
+                    <Title>Drone Flight Path</Title>
+                    <LineSymbolizer>
+                        <Stroke>
+                            <CssParameter name="stroke">#3b82f6</CssParameter>
+                            <CssParameter name="stroke-width">2</CssParameter>
+                            <CssParameter name="stroke-opacity">0.6</CssParameter>
+                            <CssParameter name="stroke-dasharray">5 3</CssParameter>
+                        </Stroke>
+                    </LineSymbolizer>
+                </Rule>
+                <Rule>
+                    <Name>no_fire_points</Name>
+                    <Title>No Fire</Title>
+                    <ogc:Filter>
+                        <ogc:PropertyIsEqualTo>
+                            <ogc:PropertyName>prediction</ogc:PropertyName>
+                            <ogc:Literal>no_fire</ogc:Literal>
+                        </ogc:PropertyIsEqualTo>
+                    </ogc:Filter>
+                    <PointSymbolizer>
+                        <Graphic>
+                            <Mark>
+                                <WellKnownName>circle</WellKnownName>
+                                <Fill>
+                                    <CssParameter name="fill">#2ecc71</CssParameter>
+                                    <CssParameter name="fill-opacity">0.45</CssParameter>
+                                </Fill>
+                                <Stroke>
+                                    <CssParameter name="stroke">#1e8449</CssParameter>
+                                    <CssParameter name="stroke-width">0.5</CssParameter>
+                                </Stroke>
+                            </Mark>
+                            <Size>
+                                <ogc:Function name="env">
+                                    <ogc:Literal>drone_size_small</ogc:Literal>
+                                    <ogc:Literal>4</ogc:Literal>
+                                </ogc:Function>
+                            </Size>
+                        </Graphic>
+                    </PointSymbolizer>
+                </Rule>
+                <Rule>
+                    <Name>fire_points</Name>
+                    <Title>Fire</Title>
+                    <ogc:Filter>
+                        <ogc:PropertyIsEqualTo>
+                            <ogc:PropertyName>prediction</ogc:PropertyName>
+                            <ogc:Literal>fire</ogc:Literal>
+                        </ogc:PropertyIsEqualTo>
+                    </ogc:Filter>
+                    <PointSymbolizer>
+                        <Graphic>
+                            <Mark>
+                                <WellKnownName>circle</WellKnownName>
+                                <Fill>
+                                    <CssParameter name="fill">#ff8c42</CssParameter>
+                                    <CssParameter name="fill-opacity">0.55</CssParameter>
+                                </Fill>
+                                <Stroke>
+                                    <CssParameter name="stroke">#c0392b</CssParameter>
+                                    <CssParameter name="stroke-width">0.7</CssParameter>
+                                </Stroke>
+                            </Mark>
+                            <Size>
+                                <ogc:Function name="env">
+                                    <ogc:Literal>drone_size_large</ogc:Literal>
+                                    <ogc:Literal>5</ogc:Literal>
+                                </ogc:Function>
+                            </Size>
+                        </Graphic>
+                    </PointSymbolizer>
+                </Rule>
+            </FeatureTypeStyle>
+        </UserStyle>
+    </NamedLayer>
+</StyledLayerDescriptor>

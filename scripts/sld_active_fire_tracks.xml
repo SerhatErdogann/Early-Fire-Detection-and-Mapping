@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<StyledLayerDescriptor version="1.0.0"
+    xmlns="http://www.opengis.net/sld"
+    xmlns:ogc="http://www.opengis.net/ogc"
+    xmlns:xlink="http://www.w3.org/1999/xlink"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.opengis.net/sld http://schemas.opengis.net/sld/1.0.0/StyledLayerDescriptor.xsd">
+
+    <NamedLayer>
+        <Name>active_fire_tracks_style</Name>
+        <UserStyle>
+            <Title>Active Fire Tracks</Title>
+            <FeatureTypeStyle>
+                <Rule>
+                    <Name>active_fire</Name>
+                    <Title>Active Fire</Title>
+                    <PointSymbolizer>
+                        <Graphic>
+                            <Mark>
+                                <WellKnownName>circle</WellKnownName>
+                                <Fill>
+                                    <CssParameter name="fill">#e60000</CssParameter>
+                                    <CssParameter name="fill-opacity">0.92</CssParameter>
+                                </Fill>
+                                <Stroke>
+                                    <CssParameter name="stroke">#ffffff</CssParameter>
+                                    <CssParameter name="stroke-width">2.2</CssParameter>
+                                </Stroke>
+                            </Mark>
+                            <Size>
+                                <ogc:Function name="env">
+                                    <ogc:Literal>track_size</ogc:Literal>
+                                    <ogc:Literal>12</ogc:Literal>
+                                </ogc:Function>
+                            </Size>
+                        </Graphic>
+                    </PointSymbolizer>
+                </Rule>
+            </FeatureTypeStyle>
+        </UserStyle>
+    </NamedLayer>
+</StyledLayerDescriptor>
