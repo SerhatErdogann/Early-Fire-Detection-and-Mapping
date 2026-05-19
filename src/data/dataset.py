@@ -267,7 +267,7 @@ class FlameDataset(Dataset):
     Minimal dataset wrapper used by `src/training/trainer.py`.
 
     Thermal/RGB **additive Gaussian noise is not applied here** (training stays clean).
-    For noise stress tests on held-out data use `src/eval/robustness_eval.py` / `ablation_eval.py`.
+    For held-out realistic eval (mild blur) use `src/eval/robustness_eval.py`; see also `ablation_eval.py`.
 
     Expected df columns:
     - `path_rgb` (str)

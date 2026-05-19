@@ -407,15 +407,66 @@ def build_optimizer_with_thermal_multiplier(
     return torch.optim.AdamW(groups, weight_decay=wdec)
 
 
+# improve_results.csv: fixed realistic metric keys + stable column order (see append_experiment_csv_row).
+_IMPROVE_REALISTIC_METRICS: tuple[str, ...] = (
+    "val_realistic_f1",
+    "val_realistic_recall",
+    "val_realistic_fpr",
+    "test_realistic_f1",
+    "test_realistic_recall",
+    "test_realistic_fpr",
+)
+_IMPROVE_ROW_HEAD: tuple[str, ...] = (
+    "ts_done",
+    "experiment_name",
+    "suite_audit",
+    "csv_index",
+    "model_family",
+    "mode",
+    "backbone",
+    "thermal_norm",
+    "thermal_init",
+    "freeze_rgb_epochs",
+    "thermal_lr_mult",
+    "modal_dropout_p",
+    "rgb_aug_intensity",
+    "thermal_aug_intensity",
+    "gate_entropy_weight",
+    "gate_min_thermal_floor",
+    "gate_min_thermal_weight",
+    "gate_balance_weight",
+    "selection_metric",
+    "loss_name",
+    "out_ckpt",
+)
+
+
 def append_experiment_csv_row(csv_path: str | Path, row: dict) -> None:
     import csv as _csv
 
     p = Path(csv_path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    cols = sorted(row.keys())
+    row = dict(row)
+    for k in list(row.keys()):
+        if k.startswith(("val_clean_", "test_clean_", "val_stress_", "test_stress_")):
+            row.pop(k, None)
+        elif (
+            k.startswith("val_realistic_") or k.startswith("test_realistic_")
+        ) and k not in _IMPROVE_REALISTIC_METRICS:
+            row.pop(k, None)
+    seen: set[str] = set()
+    fieldnames: list[str] = []
+    for k in (*_IMPROVE_ROW_HEAD, *_IMPROVE_REALISTIC_METRICS):
+        if k in row and k not in seen:
+            fieldnames.append(k)
+            seen.add(k)
+    for k in sorted(row.keys()):
+        if k not in seen:
+            fieldnames.append(k)
+            seen.add(k)
     new_file = not p.exists()
     with p.open("a", encoding="utf-8", newline="") as f:
-        w = _csv.DictWriter(f, fieldnames=cols)
+        w = _csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         if new_file:
             w.writeheader()
         w.writerow(row)
@@ -1074,7 +1125,7 @@ def train_one_run(
                 if isinstance(aux_g, dict) and "gate_rgb" in aux_g:
                     gr = float(aux_g["gate_rgb"].mean().detach().cpu())
                     gt = float(aux_g["gate_thermal"].mean().detach().cpu())
-                    print(f"[val] gated fusion mean gates (noisy mini-batch): RGB={gr:.4f} TH={gt:.4f}")
+                    print(f"[val] gated fusion mean gates (realistic mini-batch): RGB={gr:.4f} TH={gt:.4f}")
             except Exception as eg:
                 print(f"[val] gated diagnostics skipped: {type(eg).__name__}: {eg}")
 
@@ -1117,7 +1168,7 @@ def train_one_run(
             n_tn = int((pred == 0).sum())
             fp_rate = n_fp / max(1, len(ey))
             print(
-                f"Extra test noisy ({corr_name}@{corr_sev}) n={len(ey)} "
+                f"Extra test realistic ({corr_name}@{corr_sev}) n={len(ey)} "
                 f"FP={n_fp} TN={n_tn} FP_rate={fp_rate:.3f}"
             )
 

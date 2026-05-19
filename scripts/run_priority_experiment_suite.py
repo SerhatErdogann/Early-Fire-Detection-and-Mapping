@@ -13,7 +13,6 @@ Requirements: project root cwd, usable ``master_index.parquet``, GPU optional bu
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import subprocess
 import sys
@@ -35,45 +34,9 @@ def run_cmd(cmd: list[str], cwd: Path) -> int:
 
 
 def detect_modality_collapse(csv_path: Path) -> tuple[bool, str]:
-    """Fusion RGB-vs-thermal heuristic from robustness CSV (works with protocol-only grids)."""
-    df = pd.read_csv(csv_path) if csv_path.exists() else pd.DataFrame()
-    if df.empty:
-        return False, "no_robustness_csv"
-    try:
-        rgb_sub = df[df["corruption"] == "gauss_noise_rgb"]
-        th_sub = df[df["corruption"] == "gauss_noise_thermal"]
-        if len(rgb_sub) == 0 or len(th_sub) == 0:
-            return False, "missing_noise_rows"
-        if "severity" in rgb_sub.columns:
-            sev_rgb = int(rgb_sub["severity"].max())
-            r_rgb = float(rgb_sub[rgb_sub["severity"] == sev_rgb]["recall"].iloc[0])
-        else:
-            r_rgb = float(rgb_sub["recall"].iloc[0])
-        if "severity" in th_sub.columns:
-            sev_th = int(th_sub["severity"].max())
-            rt = float(th_sub[th_sub["severity"] == sev_th]["recall"].iloc[0])
-        else:
-            rt = float(th_sub["recall"].iloc[0])
-        clean_rows = df[df["corruption"] == "clean"]
-        if len(clean_rows) > 0:
-            ref = float(clean_rows["recall"].iloc[0])
-        else:
-            ref = max(float(rt), 0.2)
-    except Exception:
-        return False, "parse_error"
-    collapse = (float(r_rgb) < 0.05) and (float(rt) > float(ref) * 0.85)
-    hint = "`--legacy-grid` ile tam grid veya daha yüksek seviye satırları üretin."
-    if collapse:
-        reason = (
-            "RGB gauss_noise ile recall çok düşük, thermal gürültü ise referansa yakın "
-            "(olası RGB ağırlıklı modality collapse). " + hint
-        )
-    else:
-        reason = (
-            "Protokol gürültü satırlarında klasik collapse imzası yok. "
-            "Daha ağır seviye veya daha geniş bozunma kümesi için " + hint
-        )
-    return collapse, reason
+    """Realistic eval is gaussian_blur@1 only — use ``ablation_eval`` for RGB vs thermal collapse."""
+    _ = csv_path
+    return False, "skipped_see_ablation_eval"
 
 
 def _metrics_flat_for_improve_csv(
@@ -113,7 +76,6 @@ def _metrics_flat_for_improve_csv(
             ("f1", "f1"),
             ("recall", "recall"),
             ("fpr", "false_positive_rate"),
-            ("auc", "auc"),
         ):
             if sk in src:
                 v0 = src[sk]
@@ -190,17 +152,6 @@ def diagnose_gated_ckpt(ckpt: Path, mf: str) -> dict:
         }
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
-
-
-def append_csv_row(csv_path: Path, row: dict) -> None:
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    cols = sorted(row.keys())
-    new_file = not csv_path.exists()
-    with csv_path.open("a", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=cols)
-        if new_file:
-            w.writeheader()
-        w.writerow(row)
 
 
 def main() -> int:
@@ -377,7 +328,7 @@ def main() -> int:
             "gated_diag_json": json.dumps(gated, ensure_ascii=False)[:900],
             "experiment_log_csv_used": str(exp_csv),
         }
-        append_csv_row(PROJECT_ROOT / "outputs/experiment_suite_diagnostics.csv", row)
+        append_experiment_csv_row(str(PROJECT_ROOT / "outputs/experiment_suite_diagnostics.csv"), row)
         (PROJECT_ROOT / f"outputs/suite_diag_{spec['name']}.json").write_text(
             json.dumps(row, indent=2, ensure_ascii=False),
             encoding="utf-8",
@@ -385,7 +336,7 @@ def main() -> int:
         merged = PROJECT_ROOT / "outputs/improve_results_suite_merged_hints.csv"
         row2 = dict(row)
         row2["metrics_json"] = str(metrics_json)
-        append_csv_row(merged, row2)
+        append_experiment_csv_row(str(merged), row2)
         diag_for_csv = dict(row)
         en_suffix = ""
         if metrics_json.is_file():
@@ -424,8 +375,6 @@ def main() -> int:
                 csv_path,
                 "--split",
                 "test",
-                "--severities",
-                "1",
                 "--out",
                 str(PROJECT_ROOT / "outputs/robustness_eval.csv"),
             ],
