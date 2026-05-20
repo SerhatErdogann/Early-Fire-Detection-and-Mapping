@@ -89,7 +89,7 @@ def run_audit(
 ) -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ck = _load_ck(str(ckpt_path), device)
-    mf = str(ck.get("model_family", "dual_branch_fusion")).lower()
+    mf = str(ck.get("model_family", "dual_branch_gated_fusion")).lower()
     backbone = str(ck.get("backbone", "resnet50"))
     size = int(ck.get("input_size", 384))
     mode = str(ck.get("mode", "fusion")).lower()

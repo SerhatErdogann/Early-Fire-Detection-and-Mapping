@@ -569,13 +569,12 @@ def train_one_run(
             df = df[~df["source"].astype(str).isin(ex)].copy()
             print(f"[train] exclude_sources={sorted(ex)} removed={before-len(df)} kept={len(df)}")
 
-    mf = (model_family or "early_fusion").lower()
-    if mf == "rgb_baseline":
-        mode = "rgb"
-    elif mf == "thermal_baseline":
-        mode = "thermal"
-    elif mf == "early_fusion" or _is_fusion_dual_family(mf):
-        mode = "fusion"
+    mf = str(model_family or "dual_branch_gated_fusion").lower().strip()
+    if mf != "dual_branch_gated_fusion":
+        raise ValueError(
+            f"Unsupported model_family={model_family!r}. Train/inference supports dual_branch_gated_fusion only."
+        )
+    mode = "fusion"
 
     df, drop_tr = filter_df_existing_paths(df, mode=mode)
     if drop_tr:
@@ -1311,8 +1310,6 @@ def train_one_run(
                 **extra_info,
             }
             metrics_path = Path(OUTPUTS_DIR) / f"metrics_{mode}_{mf}.json"
-            if mf == "early_fusion" and mode == "fusion":
-                metrics_path = Path(OUTPUTS_DIR) / f"metrics_{mode}.json"
             metrics_path.parent.mkdir(parents=True, exist_ok=True)
             with open(metrics_path, "w", encoding="utf-8") as f:
                 json.dump(sanitize_for_json(metrics), f, indent=2, ensure_ascii=False)

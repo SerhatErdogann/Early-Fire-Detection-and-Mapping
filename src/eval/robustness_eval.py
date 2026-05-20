@@ -114,7 +114,10 @@ def _load_checkpoint(ckpt_path: str, device: str) -> dict:
 
 def _build_model(ck: dict, device: str) -> tuple[torch.nn.Module, dict]:
     mode = str(ck.get("mode") or "fusion").lower()
-    family = str(ck.get("model_family") or "dual_branch_fusion").lower()
+    family = str(ck.get("model_family") or "dual_branch_gated_fusion").lower()
+    state = ck.get("state") or {}
+    if any(isinstance(k, str) and k.startswith("gate_mlp.") for k in state.keys()):
+        family = "dual_branch_gated_fusion"
     backbone = str(ck.get("backbone") or "resnet50")
     size = int(ck.get("input_size") or 384)
     model = make_classifier(family, backbone, mode, num_classes=2, pretrained=False)

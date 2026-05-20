@@ -7,7 +7,7 @@ Features
   numeric ``test_realistic_recall`` (restart-safe; legacy rows may still expose ``test_recall``).
 - After each successful train: copy checkpoint to ``models/by_experiment/{slug}.pt``
   so ``select_best_and_report.py`` can pick the *correct* weights (canonical
-  ``dual_branch.pt`` / ``fusion.pt`` are overwritten each run).
+  ``dual_branch.pt`` is overwritten each run).
 - Run ``robustness_eval`` + ``ablation_eval`` per experiment; archive CSVs under
   ``outputs/kaggle_eval_archive/`` and refresh ``outputs/robustness_eval.csv`` /
   ``outputs/ablation_suite.csv`` with the latest run.
@@ -49,8 +49,7 @@ def _slug_experiment_name(name: str) -> str:
 
 
 def _canonical_ckpt(models_dir: Path, model_family: str) -> Path:
-    if str(model_family) == "early_fusion":
-        return models_dir / "fusion.pt"
+    _ = model_family  # always archive from dual_branch.pt product path
     return models_dir / "dual_branch.pt"
 
 
@@ -133,63 +132,13 @@ def _run_capture(cmd: list[str], cwd: Path, env: dict) -> tuple[int, str]:
 
 
 def _experiments_catalog() -> list[dict]:
-    """Ordered experiment grid (edit below for your notebook)."""
+    """Gated fusion experiment grid."""
     fusion_common = ["--selection_metric", "recall_fpr", "--loss_mode", "balanced_sampler", "--loss_name", "cb_focal"]
+    gf = "dual_branch_gated_fusion"
     return [
         {
-            "experiment_name": "kaggle_early_fusion_effnet",
-            "model_family": "early_fusion",
-            "extra_args": fusion_common.copy(),
-            "notes": "Single-encoder 4-channel baseline",
-        },
-        {
-            "experiment_name": "kaggle_dbf_baseline_rcfpr",
-            "model_family": "dual_branch_fusion",
-            "extra_args": fusion_common.copy(),
-            "notes": "Dual-branch concat baseline + recall/FPR metric",
-        },
-        {
-            "experiment_name": "kaggle_dbf_strengthened",
-            "model_family": "dual_branch_fusion",
-            "extra_args": fusion_common.copy()
-            + [
-                "--modal_dropout_p",
-                "0.15",
-                "--thermal_lr_mult",
-                "1.25",
-                "--freeze_rgb_epochs",
-                "2",
-                "--thermal_norm",
-                "train_zscore",
-            ],
-            "notes": "Modal dropout + thermal LR + warmup + train_zscore",
-        },
-        {
-            "experiment_name": "kaggle_dbf_attn",
-            "model_family": "dual_branch_attention_fusion",
-            "extra_args": fusion_common.copy()
-            + [
-                "--modal_dropout_p",
-                "0.25",
-                "--thermal_lr_mult",
-                "1.25",
-                "--freeze_rgb_epochs",
-                "2",
-                "--thermal_norm",
-                "train_zscore",
-            ],
-            "notes": "Attention fusion variant",
-        },
-        {
-            "experiment_name": "kaggle_dbf_mid_res50",
-            "model_family": "dual_branch_mid_fusion",
-            "extra_args": fusion_common.copy()
-            + ["--backbone", "resnet50", "--modal_dropout_p", "0.18", "--thermal_lr_mult", "1.15", "--freeze_rgb_epochs", "2", "--thermal_norm", "train_zscore"],
-            "notes": "Mid fusion heavier path",
-        },
-        {
             "experiment_name": "kaggle_dbf_gated_primary",
-            "model_family": "dual_branch_gated_fusion",
+            "model_family": gf,
             "extra_args": fusion_common.copy()
             + [
                 "--modal_dropout_p",
@@ -205,7 +154,7 @@ def _experiments_catalog() -> list[dict]:
         },
         {
             "experiment_name": "kaggle_dbf_gated_md02_fr2",
-            "model_family": "dual_branch_gated_fusion",
+            "model_family": gf,
             "extra_args": fusion_common.copy()
             + [
                 "--modal_dropout_p",
@@ -221,7 +170,7 @@ def _experiments_catalog() -> list[dict]:
         },
         {
             "experiment_name": "kaggle_dbf_gated_md03_fr1",
-            "model_family": "dual_branch_gated_fusion",
+            "model_family": gf,
             "extra_args": fusion_common.copy()
             + [
                 "--modal_dropout_p",
@@ -237,7 +186,7 @@ def _experiments_catalog() -> list[dict]:
         },
         {
             "experiment_name": "kaggle_cmp_th_percentile",
-            "model_family": "dual_branch_fusion",
+            "model_family": gf,
             "extra_args": fusion_common.copy()
             + [
                 "--thermal_norm",
@@ -247,7 +196,7 @@ def _experiments_catalog() -> list[dict]:
         },
         {
             "experiment_name": "kaggle_cmp_th_train_zscore",
-            "model_family": "dual_branch_fusion",
+            "model_family": gf,
             "extra_args": fusion_common.copy()
             + [
                 "--thermal_norm",
@@ -257,7 +206,7 @@ def _experiments_catalog() -> list[dict]:
         },
         {
             "experiment_name": "kaggle_cmp_th_minmax",
-            "model_family": "dual_branch_fusion",
+            "model_family": gf,
             "extra_args": fusion_common.copy()
             + [
                 "--thermal_norm",
@@ -267,7 +216,7 @@ def _experiments_catalog() -> list[dict]:
         },
         {
             "experiment_name": "kaggle_cmp_loss_focal_shuffle",
-            "model_family": "dual_branch_fusion",
+            "model_family": gf,
             "extra_args": [
                 "--selection_metric",
                 "recall_fpr",
@@ -282,13 +231,13 @@ def _experiments_catalog() -> list[dict]:
         },
         {
             "experiment_name": "kaggle_cmp_loss_sampler_focal_ce",
-            "model_family": "dual_branch_fusion",
+            "model_family": gf,
             "extra_args": ["--selection_metric", "recall_fpr", "--loss_mode", "sampler_focal", "--loss_name", "ce", "--thermal_norm", "train_zscore"],
             "notes": "Loss: sampler_ce-style path with sampler_focal mode + CE",
         },
         {
             "experiment_name": "kaggle_cmp_loss_sampler_ce_plain",
-            "model_family": "dual_branch_fusion",
+            "model_family": gf,
             "extra_args": ["--selection_metric", "recall_fpr", "--loss_mode", "sampler_ce", "--loss_name", "ce", "--thermal_norm", "train_zscore"],
             "notes": "Loss: weighted sampler + plain CE",
         },

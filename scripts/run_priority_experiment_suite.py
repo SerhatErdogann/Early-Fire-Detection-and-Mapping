@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-"""Priority training grid + ablation + robustness + improve_results augmentation.
+"""Training + diagnostic suite for the production gated fusion model.
 
-Runs (in order):
-  1) dual_branch_gated_fusion — pri-1 hyperparameters
-  2) dual_branch_attention_fusion — pri-2
-  3) dual_branch_mid_fusion — optional if early runs miss test recall threshold
-
-Adds ``suite_summary.json`` per run and merges diagnostics into experiment CSV paths.
+Runs one ``dual_branch_gated_fusion`` training preset, then robustness/ablation and
+suite CSV hints (same downstream outputs as the older multi-variant runner).
 
 Requirements: project root cwd, usable ``master_index.parquet``, GPU optional but slow otherwise.
 """
@@ -27,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from datetime import datetime, timezone
 
 from src.training.trainer import append_experiment_csv_row
+
 
 def run_cmd(cmd: list[str], cwd: Path) -> int:
     print("+", " ".join(cmd))
@@ -133,7 +130,7 @@ def diagnose_gated_ckpt(ckpt: Path, mf: str) -> dict:
         except TypeError:
             d = torch.load(ckpt, map_location="cpu")
         mdl = make_classifier(
-            str(d.get("model_family", mf)),
+            "dual_branch_gated_fusion",
             str(d.get("backbone", "resnet50")),
             "fusion",
             pretrained=False,
@@ -166,12 +163,6 @@ def main() -> int:
         "--experiment_log_csv",
         default=str(PROJECT_ROOT / "outputs/improve_results.csv"),
     )
-    ap.add_argument(
-        "--threshold_test_recall_mid",
-        type=float,
-        default=0.98,
-        help="Run mid-fusion experiment if BOTH earlier runs dip below this on TEST recall.",
-    )
     args = ap.parse_args()
 
     py = sys.executable
@@ -190,7 +181,7 @@ def main() -> int:
 
     exp_csv = Path(args.experiment_log_csv)
 
-    PRI1 = dict(
+    PRI_GATED = dict(
         name="pri1_gated",
         family="dual_branch_gated_fusion",
         extras=[
@@ -210,52 +201,6 @@ def main() -> int:
             "recall_fpr",
             "--experiment_name",
             "pri1_gated",
-        ],
-    )
-    PRI2 = dict(
-        name="pri2_attention",
-        family="dual_branch_attention_fusion",
-        extras=[
-            "--modal_dropout_p",
-            "0.25",
-            "--thermal_lr_mult",
-            "1.25",
-            "--freeze_rgb_epochs",
-            "2",
-            "--thermal_norm",
-            "train_zscore",
-            "--selection_metric",
-            "recall_fpr",
-            "--experiment_name",
-            "pri2_attn",
-            "--loss_mode",
-            "balanced_sampler",
-            "--loss_name",
-            "cb_focal",
-        ],
-    )
-    PRI3 = dict(
-        name="pri3_mid",
-        family="dual_branch_mid_fusion",
-        extras=[
-            "--backbone",
-            "resnet50",
-            "--modal_dropout_p",
-            "0.2",
-            "--thermal_lr_mult",
-            "1.15",
-            "--freeze_rgb_epochs",
-            "2",
-            "--thermal_norm",
-            "train_zscore",
-            "--selection_metric",
-            "recall_fpr",
-            "--experiment_name",
-            "pri3_mid",
-            "--loss_mode",
-            "balanced_sampler",
-            "--loss_name",
-            "cb_focal",
         ],
     )
 
@@ -363,7 +308,6 @@ def main() -> int:
             print("[dry-run] skip ablation+robustness")
             return
         ckpt = Path(str(CKPT_DUAL_BRANCH))
-        # robustness sweep
         subprocess.run(
             [
                 py,
@@ -381,7 +325,6 @@ def main() -> int:
             cwd=str(cwd),
             check=False,
         )
-        # ablation
         subprocess.run(
             [
                 py,
@@ -400,52 +343,18 @@ def main() -> int:
             check=False,
         )
 
-    def run_phase(spec: dict) -> int | None:
-        rc = launch_train(spec)
-        robustness_and_ablation()
-        if not args.dry_run:
-            collect_suite_diagnostics(spec, int(rc) if rc is not None else -1)
-        return rc
-
     if args.dry_run:
-        for sp in (PRI1, PRI2, PRI3):
-            launch_train(sp)
-        print(
-            "[dry-run] mid-fusion if both pri1 & pri2 test recall <",
-            args.threshold_test_recall_mid,
-        )
+        launch_train(PRI_GATED)
         return 0
 
-    rc1 = run_phase(PRI1)
-    rc2 = run_phase(PRI2)
+    rc = launch_train(PRI_GATED)
+    robustness_and_ablation()
+    if not args.dry_run:
+        collect_suite_diagnostics(PRI_GATED, int(rc) if rc is not None else -1)
 
-    r1 = recalls.get("pri1_gated", float("nan"))
-    r2 = recalls.get("pri2_attention", float("nan"))
-    need_mid = False
-    if r1 == r1 and r2 == r2:
-        need_mid = (r1 < float(args.threshold_test_recall_mid)) and (
-            r2 < float(args.threshold_test_recall_mid)
-        )
-    s1 = f"{r1:.4f}" if r1 == r1 else "nan"
-    s2 = f"{r2:.4f}" if r2 == r2 else "nan"
-    print(
-        f"[suite] recalls pri1={s1} pri2={s2} threshold={args.threshold_test_recall_mid} -> need_mid={need_mid}"
-    )
-
-    rc3: int | None = None
-    if need_mid:
-        rc3 = run_phase(PRI3)
-
-    summary = {"recalls_by_phase": recalls, "ran_mid": bool(need_mid), "codes": {}}
-    if rc1 is not None:
-        summary["codes"]["pri1"] = rc1
-    if rc2 is not None:
-        summary["codes"]["pri2"] = rc2
-    if need_mid and rc3 is not None:
-        summary["codes"]["pri3"] = rc3
-
+    summary = {"recalls_by_phase": recalls, "codes": {"pri_gated": rc}}
     outp = PROJECT_ROOT / "outputs/suite_priority_run_summary.json"
-    outp.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    outp.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"wrote {outp}")
     return 0
 

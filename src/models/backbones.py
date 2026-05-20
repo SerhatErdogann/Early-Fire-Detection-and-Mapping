@@ -126,7 +126,7 @@ def make_feature_extractor(
     *,
     thermal_init: str = "mean_rgb",
 ):
-    """Unified feature-extractor factory used by dual-branch fusion.
+    """Unified feature-extractor factory used by dual-branch gated fusion.
     Supports resnet18 / resnet50 / efficientnet_b0."""
     b = (backbone or "resnet18").lower()
     if b in ("efficientnet_b0", "efficientnet-b0", "efficientnetb0"):
@@ -134,27 +134,6 @@ def make_feature_extractor(
     return make_resnet_feature_extractor(
         b, in_ch, pretrained=pretrained, thermal_init=thermal_init
     )
-
-
-def bare_resnet_for_features(
-    backbone: str,
-    in_ch: int,
-    pretrained: bool = True,
-    *,
-    thermal_init: str = "mean_rgb",
-) -> nn.Module:
-    """Full torchvision ResNet (with ``fc``) for ``create_feature_extractor``."""
-    backbone = (backbone or "resnet18").lower()
-    if backbone == "resnet50":
-        weights = _ResNet50Weights if (pretrained and in_ch == 3) else None
-        m = models.resnet50(weights=weights)
-    else:
-        weights = models.ResNet18_Weights.IMAGENET1K_V1 if (pretrained and in_ch == 3) else None
-        m = models.resnet18(weights=weights)
-    if in_ch != 3:
-        kw = dict(thermal_init=thermal_init) if in_ch == 1 else {}
-        m = adapt_first_conv(m, in_ch, **kw)
-    return m
 
 
 def make_resnet18(in_ch: int, num_classes: int = 2, pretrained: bool = True):

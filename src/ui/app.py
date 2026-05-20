@@ -35,15 +35,11 @@ from src.ui.video_panel import render_frame_cards, render_preview_with_frame_arr
 try:
     from config import (
         CKPT_DUAL_BRANCH,
-        CKPT_FUSION,
-        CKPT_RGB,
         MODELS_DIR,
         OUTPUTS_DIR,
     )
 except Exception:
     CKPT_DUAL_BRANCH = Path("models/dual_branch.pt")
-    CKPT_FUSION = Path("models/fusion.pt")
-    CKPT_RGB = Path("models/rgb.pt")
     MODELS_DIR = Path("models")
     OUTPUTS_DIR = Path("outputs")
 
@@ -56,7 +52,8 @@ def _checkpoint_options() -> list[str]:
         if s not in seen:
             seen.append(s)
 
-    for cand in (CKPT_DUAL_BRANCH, CKPT_FUSION, CKPT_RGB):
+    # Final system ships only the gated dual-branch fusion checkpoint.
+    for cand in (CKPT_DUAL_BRANCH,):
         if Path(cand).is_file():
             _add(cand)
     try:
@@ -66,8 +63,7 @@ def _checkpoint_options() -> list[str]:
     except Exception:
         pass
     if not seen:
-        for cand in (CKPT_DUAL_BRANCH, CKPT_FUSION, CKPT_RGB):
-            _add(cand)
+        _add(CKPT_DUAL_BRANCH)
     return seen
 
 

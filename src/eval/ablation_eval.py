@@ -66,8 +66,11 @@ def run_ablation(
 ) -> pd.DataFrame:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ck = _load_ckpt(ckpt_path, device)
-    mf = str(ck.get("model_family", "dual_branch_fusion")).lower()
+    mf = str(ck.get("model_family", "dual_branch_gated_fusion")).lower()
     backbone = str(ck.get("backbone", "resnet50"))
+    state = ck.get("state") or {}
+    if any(isinstance(k, str) and k.startswith("gate_mlp.") for k in state.keys()):
+        mf = "dual_branch_gated_fusion"
     size = int(ck.get("input_size", 384))
     mode = str(ck.get("mode", "fusion")).lower()
     if mode != "fusion":

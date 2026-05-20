@@ -94,9 +94,8 @@ FUSION_TRAIN_DEFAULT = {
     "patience": 6,
     "loss_name": "cb_focal",
     "loss_mode": "sampler_focal",
-    "backbone": "efficientnet_b0",
     "size": 384,
-    "model_family": "dual_branch_fusion",
+    "model_family": "dual_branch_gated_fusion",
     "dual_branch_backbone": "resnet50",
     # Slightly higher gamma on hard examples (less overconfident fire on ambiguous backgrounds).
     "focal_gamma": 2.25,

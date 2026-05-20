@@ -124,7 +124,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--results_csv", default="outputs/improve_results.csv")
     ap.add_argument("--min_recall", type=float, default=0.98, help="Gate for low-FPR bucket (realistic test).")
-    ap.add_argument("--baseline_family", default="dual_branch_fusion")
+    ap.add_argument("--baseline_family", default="dual_branch_gated_fusion")
     ap.add_argument(
         "--copy_balanced_ckpt",
         default="best_model.pt",

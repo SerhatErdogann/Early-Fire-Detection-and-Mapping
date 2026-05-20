@@ -1,3 +1,3 @@
-from .dual_branch_fusion import DualBranchFusion
+from .dual_branch_gated_fusion import DualBranchGatedFusion
 
-__all__ = ["DualBranchFusion"]
+__all__ = ["DualBranchGatedFusion"]

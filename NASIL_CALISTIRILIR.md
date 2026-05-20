@@ -216,28 +216,17 @@ Standart karşılaştırma eğitimleri için:
 powershell -ExecutionPolicy Bypass -File scripts\ablations.ps1 -Ablation all -Epochs 20
 ```
 
-Tek ablation çalıştırmak için:
+Tek çalıştırma seçenekleri:
 
 ```powershell
-# RGB baseline
-powershell -ExecutionPolicy Bypass -File scripts\ablations.ps1 -Ablation rgb
+# Gated dual-branch fusion -> models/dual_branch.pt (üretim)
+powershell -ExecutionPolicy Bypass -File scripts\ablations.ps1 -Ablation gated
 
-# Thermal baseline
-powershell -ExecutionPolicy Bypass -File scripts\ablations.ps1 -Ablation thermal
-
-# Early fusion (tek 4 kanallı encoder)
-powershell -ExecutionPolicy Bypass -File scripts\ablations.ps1 -Ablation early_fusion
-
-# Dual-branch fusion (varsayılan fusion yolu)
-powershell -ExecutionPolicy Bypass -File scripts\ablations.ps1 -Ablation dual_branch
-
-# Hard negative retrain (dual_branch_fusion -> val FP'lerini yeniden beslet)
+# Hard negative retrain (önce çıktılarını CSV'ye bağlayın; yoksa atlanır)
 powershell -ExecutionPolicy Bypass -File scripts\ablations.ps1 -Ablation hard_neg_retrain
 ```
 
-Not: `--mode fusion` artık varsayılan olarak `dual_branch_fusion` model ailesini kullanır
-(`rgb` ve `thermal` için ayrı backbone, son feature'lar concat edilip classifier'a gidiyor).
-Eski davranışı istiyorsanız `--model_family early_fusion` ile açıkça belirtin.
+Varsayılan: `dual_branch_gated_fusion`, çıktı checkpoint `models/dual_branch.pt`; `--mode fusion` ile RGB + termal 4 kanal tensör kullanılır.
 
 ## Benchmark ve Test
 
