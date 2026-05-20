@@ -78,6 +78,7 @@ def _to_device_batch(x_np: np.ndarray, device: str) -> torch.Tensor:
 def run_video_inference(
     rgb_video_path=None,
     th_video_path=None,
+    ckpt_path: str | None = None,
     ckpt_fusion: str | None = None,
     ckpt_rgb: str | None = None,
     ckpt_thermal: str | None = None,
@@ -205,29 +206,29 @@ def run_video_inference(
         except Exception:
             return False
 
-    # Load available checkpoints (fusion preferred). Fusion can also act as fallback by zero-filling missing modality.
+    # Single production checkpoint (dual_branch_gated_fusion). Legacy ckpt_* aliases map here.
+    resolved_ckpt = ckpt_path or ckpt_fusion or ckpt_rgb or ckpt_thermal
+    if not resolved_ckpt or not _exists(resolved_ckpt):
+        raise SystemExit(
+            "Gated fusion checkpoint not found. Provide --model / ckpt_path "
+            "(default models/dual_branch.pt)."
+        )
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    models: dict[str, dict] = {}
-    if _exists(ckpt_fusion):
-        m, _m_mode, _dev, thr_f, temp_f = load_checkpoint(str(ckpt_fusion))
-        models["fusion"] = {"model": m, "thr": float(thr_f), "temp": float(temp_f), "ckpt": str(ckpt_fusion), "in_ch": 4}
-    if _exists(ckpt_rgb):
-        m, _m_mode, _dev, thr_r, temp_r = load_checkpoint(str(ckpt_rgb))
-        models["rgb"] = {"model": m, "thr": float(thr_r), "temp": float(temp_r), "ckpt": str(ckpt_rgb), "in_ch": 3}
-    if _exists(ckpt_thermal):
-        m, _m_mode, _dev, thr_t, temp_t = load_checkpoint(str(ckpt_thermal))
-        models["thermal"] = {"model": m, "thr": float(thr_t), "temp": float(temp_t), "ckpt": str(ckpt_thermal), "in_ch": 1}
-
-    if not models:
-        raise SystemExit("No checkpoints found. Provide at least one of ckpt_fusion/ckpt_rgb/ckpt_thermal.")
+    m, _m_mode, _dev, thr_f, temp_f = load_checkpoint(str(resolved_ckpt))
+    model_pack = {
+        "model": m,
+        "thr": float(thr_f),
+        "temp": float(temp_f),
+        "ckpt": str(resolved_ckpt),
+        "in_ch": 4,
+    }
 
     # default override threshold (applies to all modes if set)
     override_thr = float(override_thr) if override_thr is not None else None
     # Seed `thr` from the first available checkpoint so early-detection threshold
     # shifting has a defined starting point even before we know which per-frame
     # model will run. Re-set per frame inside the loop using the selected model.
-    _first_model_pack = next(iter(models.values()))
-    thr = float(_first_model_pack["thr"])
+    thr = float(model_pack["thr"])
     if early_detection:
         thr = max(float(early_min_threshold), float(thr) - float(early_threshold_shift))
     persist_target = max(1, int(early_persist_n if early_detection else persist_n))
@@ -248,12 +249,12 @@ def run_video_inference(
 
             # Attach CAM to whichever model we loaded first (best-effort
             # analytics; CAM target layer varies per backbone).
-            _cam_model = next(iter(models.values()))["model"]
+            _cam_model = model_pack["model"]
             cam_extractor = SmoothGradCAMpp(_cam_model, target_layer=cam_layer)
         except Exception as e:
             print(f"[video] CAM setup failed ({type(e).__name__}): {e}; continuing without CAM.")
             cam_extractor = None
-    # Determine starting preference (auto: fusion -> rgb -> thermal)
+    # Input modality routing (same gated model; missing modality is zero-filled).
     mode = (mode or "auto").lower().strip()
     if mode not in ("auto", "fusion", "rgb", "thermal"):
         mode = "auto"
@@ -397,26 +398,19 @@ def run_video_inference(
 
         mode_used = None
         for m in pref:
-            if m == "fusion" and have_rgb and have_th and ("fusion" in models):
+            if m == "fusion" and have_rgb and have_th:
                 mode_used = "fusion"
                 break
-            if m == "rgb" and have_rgb and (("rgb" in models) or ("fusion" in models)):
+            if m == "rgb" and have_rgb:
                 mode_used = "rgb"
                 break
-            if m == "thermal" and have_th and (("thermal" in models) or ("fusion" in models)):
+            if m == "thermal" and have_th:
                 mode_used = "thermal"
                 break
         if mode_used is None:
             idx += 1
             pbar.update(1)
             continue
-
-        if mode_used == "fusion":
-            model_pack = models["fusion"]
-        elif mode_used == "rgb":
-            model_pack = models["rgb"] if "rgb" in models else models["fusion"]
-        else:
-            model_pack = models["thermal"] if "thermal" in models else models["fusion"]
 
         thr_run = float(model_pack["thr"])
         if override_thr is not None:
@@ -487,17 +481,11 @@ def run_video_inference(
                     modal_agreement = _safe_corr2d(rgb_arr.mean(axis=0), th_arr[0])
                 x_np = np.concatenate([rgb_arr, th_arr], axis=0)
             elif mode_used == "rgb":
-                if "rgb" in models:
-                    x_np = rgb_arr
-                else:
-                    z = np.zeros((1, rgb_arr.shape[1], rgb_arr.shape[2]), dtype=np.float32)
-                    x_np = np.concatenate([rgb_arr, z], axis=0)
+                z = np.zeros((1, rgb_arr.shape[1], rgb_arr.shape[2]), dtype=np.float32)
+                x_np = np.concatenate([rgb_arr, z], axis=0)
             else:
-                if "thermal" in models:
-                    x_np = th_arr
-                else:
-                    z = np.zeros((3, th_arr.shape[1], th_arr.shape[2]), dtype=np.float32)
-                    x_np = np.concatenate([z, th_arr], axis=0)
+                z = np.zeros((3, th_arr.shape[1], th_arr.shape[2]), dtype=np.float32)
+                x_np = np.concatenate([z, th_arr], axis=0)
 
             model = model_pack["model"]
             base_for_overlay = rgb_base

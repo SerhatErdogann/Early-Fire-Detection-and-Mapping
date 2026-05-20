@@ -47,10 +47,7 @@ BINARY_ROOT = _path_from_env("FLAME_BINARY_ROOT", DATA_ROOT / "binary")
 # Under flame3: folders that contain fire/ + no fire/ (or no_fire) each with rgb + thermal
 FLAME_NESTED_SCAN = ["binary", "dataset"]
 
-# Model checkpoints (relative to PROJECT_ROOT)
-CKPT_RGB = MODELS_DIR / "rgb.pt"
-CKPT_THERMAL = MODELS_DIR / "thermal.pt"
-CKPT_FUSION = MODELS_DIR / "fusion.pt"
+# Production checkpoint (gated dual-branch RGB+thermal fusion)
 CKPT_DUAL_BRANCH = MODELS_DIR / "dual_branch.pt"
 
 # ---------- Data ----------

@@ -1,4 +1,4 @@
-from .backbones import get_model_config, make_model
+from .backbones import get_model_config
 from .cls.dual_branch_gated_fusion import DualBranchGatedFusion
 
 
@@ -38,7 +38,6 @@ def make_classifier(
 
 
 __all__ = [
-    "make_model",
     "get_model_config",
     "make_classifier",
     "DualBranchGatedFusion",

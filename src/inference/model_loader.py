@@ -100,9 +100,7 @@ def route_checkpoint_for_video(
     """
     p = Path(str(ckpt_path))
     if not p.is_file():
-        if has_thermal_video:
-            return str(ckpt_path), None, None, "fusion"
-        return None, str(ckpt_path), None, "rgb"
+        return str(ckpt_path), None, None, ("fusion" if has_thermal_video else "rgb")
 
     try:
         cpu_ckpt = torch.load(p, map_location="cpu", weights_only=True)

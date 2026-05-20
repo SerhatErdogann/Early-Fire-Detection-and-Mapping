@@ -57,7 +57,7 @@ python src/02_train.py --mode fusion --epochs 20
 python src/02_train.py --mode fusion --epochs 25 --backbone resnet50
 ```
 
-Modeller `models/` klasörüne kaydedilir: `rgb.pt`, `thermal.pt`, `fusion.pt`
+Üretim modeli `models/dual_branch.pt` olarak kaydedilir (`dual_branch_gated_fusion`).
 
 ---
 
