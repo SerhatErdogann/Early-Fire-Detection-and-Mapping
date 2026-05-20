@@ -21,23 +21,23 @@
     <!-- Navbar -->
     <nav class="navbar">
         <div class="logo">
-            <i class="fa-solid fa-fire-flame-curved"></i> Early Fire Detection
+            Early Fire Detection
         </div>
         <ul class="nav-links">
-            <li><a href="#about">About</a></li>
+            <li><a href="#about">Problem & Motivation</a></li>
             <li><a href="#pipeline">Pipeline</a></li>
             <li><a href="#dashboard">Dashboard</a></li>
             <li><a href="#tech">Technologies</a></li>
         </ul>
-        <a href="https://github.com/SerhatErdogann" target="_blank" class="btn-github"><i
-                class="fa-brands fa-github"></i> GitHub</a>
+        <a href="https://github.com/SerhatErdogann/Early-Fire-Detection-and-Mapping" target="_blank"
+            class="btn-github"><i class="fa-brands fa-github"></i> GitHub</a>
     </nav>
 
     <!-- Hero Section -->
     <section class="hero" id="home">
         <div class="hero-content">
             <div class="badge">TUSAŞ LIFT-UP Supported Project</div>
-            <h1>Multimodal AI for <span class="highlight">Early Wildfire Detection</span></h1>
+            <h1>Early Fire Detection and Mapping</h1>
             <p>A real-time, drone-based forest fire warning system combining RGB & Thermal imagery with Google Earth
                 Engine environmental data.</p>
             <div class="hero-buttons">
@@ -46,42 +46,28 @@
             </div>
         </div>
         <div class="hero-image">
-            <div class="glass-card">
-                <img src="https://images.unsplash.com/photo-1595981267035-7b04d84832e0?auto=format&fit=crop&q=80&w=800"
-                    alt="Drone in forest" class="floating-img">
 
-                <!-- Expanded Metrics Panel -->
-                <div class="metrics-panel">
+            <!-- Model Performance -->
+            <div class="metrics-panel">
+                <div class="metrics-panel-title">Model Evaluation</div>
+                <div class="metrics-grid">
                     <div class="metric-item">
-                        <i class="fa-solid fa-bullseye"></i>
-                        <div>
-                            <span class="stat-num">97.0%</span>
-                            <span class="stat-text">Accuracy</span>
-                        </div>
+                        <span class="stat-num">97.0%</span>
+                        <span class="stat-text">Accuracy</span>
                     </div>
                     <div class="metric-item">
-                        <i class="fa-solid fa-star"></i>
-                        <div>
-                            <span class="stat-num">96.9%</span>
-                            <span class="stat-text">F1-Score</span>
-                        </div>
+                        <span class="stat-num">96.9%</span>
+                        <span class="stat-text">F1-Score</span>
                     </div>
                     <div class="metric-item">
-                        <i class="fa-solid fa-eye"></i>
-                        <div>
-                            <span class="stat-num">99.5%</span>
-                            <span class="stat-text">Recall</span>
-                        </div>
+                        <span class="stat-num">99.5%</span>
+                        <span class="stat-text">Recall</span>
                     </div>
                     <div class="metric-item">
-                        <i class="fa-solid fa-check-double"></i>
-                        <div>
-                            <span class="stat-num">94.4%</span>
-                            <span class="stat-text">Precision</span>
-                        </div>
+                        <span class="stat-num">94.4%</span>
+                        <span class="stat-text">Precision</span>
                     </div>
                 </div>
-
             </div>
         </div>
     </section>
@@ -94,19 +80,16 @@
         </div>
         <div class="about-grid">
             <div class="about-card">
-                <i class="fa-solid fa-tree"></i>
                 <h3>Ecological Damage</h3>
                 <p>Wildfires spread rapidly and cause severe ecological and economic damage, especially when detection
                     and response are delayed.</p>
             </div>
             <div class="about-card">
-                <i class="fa-solid fa-drone"></i>
                 <h3>Continuous Monitoring</h3>
                 <p>Continuous aerial monitoring using drones can support faster and more dynamic wildfire detection
                     across vast forest regions.</p>
             </div>
             <div class="about-card">
-                <i class="fa-solid fa-layer-group"></i>
                 <h3>Multimodal Analysis</h3>
                 <p>Relying solely on RGB vision is prone to false alarms (e.g. sunset, smoke). Combining RGB with
                     Thermal cameras improves reliability.</p>
@@ -124,40 +107,40 @@
 
         <div class="timeline">
             <div class="timeline-item">
-                <div class="timeline-icon"><i class="fa-solid fa-video"></i></div>
+                <div class="timeline-dot">1</div>
                 <div class="timeline-content">
-                    <h3>1. Inputs</h3>
+                    <h3>Inputs</h3>
                     <p>Real-time RGB images, Thermal images, and GPS coordinates are captured by the drone.</p>
                 </div>
             </div>
             <div class="timeline-item">
-                <div class="timeline-icon"><i class="fa-solid fa-cogs"></i></div>
+                <div class="timeline-dot">2</div>
                 <div class="timeline-content">
-                    <h3>2. Preprocessing</h3>
-                    <p>Frame extraction, resizing to 224x224, and data normalization for neural network compatibility.
+                    <h3>Preprocessing</h3>
+                    <p>Frame extraction, resizing to 384x384, and data normalization for neural network compatibility.
                     </p>
                 </div>
             </div>
             <div class="timeline-item">
-                <div class="timeline-icon"><i class="fa-solid fa-network-wired"></i></div>
+                <div class="timeline-dot">3</div>
                 <div class="timeline-content">
-                    <h3>3. Feature Extraction</h3>
+                    <h3>Feature Extraction</h3>
                     <p>Dual-branch Convolutional Neural Networks (ResNet) process RGB and Thermal data independently to
                         extract critical features.</p>
                 </div>
             </div>
             <div class="timeline-item">
-                <div class="timeline-icon"><i class="fa-solid fa-satellite"></i></div>
+                <div class="timeline-dot">4</div>
                 <div class="timeline-content">
-                    <h3>4. Fuel Scorer & Fusion</h3>
+                    <h3>Fuel Scorer &amp; Fusion</h3>
                     <p>Visual features are concatenated with environmental data (NDVI, NDMI, Land Cover) fetched
                         dynamically from Google Earth Engine.</p>
                 </div>
             </div>
             <div class="timeline-item">
-                <div class="timeline-icon"><i class="fa-solid fa-chart-pie"></i></div>
+                <div class="timeline-dot">5</div>
                 <div class="timeline-content">
-                    <h3>5. Output</h3>
+                    <h3>Output</h3>
                     <p>The system predicts Risk Probability, Fire Status, and outputs a Risk Classification sent
                         instantly to the database.</p>
                 </div>
@@ -198,16 +181,25 @@
             <div class="tech-item"><i class="fa-solid fa-map-location-dot"></i> Leaflet.js</div>
             <div class="tech-item"><i class="fa-brands fa-html5"></i> Flask</div>
             <div class="tech-item"><i class="fa-solid fa-network-wired"></i> ResNet50</div>
+            <div class="tech-item"><i class="fa-solid fa-server"></i> GeoServer</div>
         </div>
     </section>
 
     <!-- Footer -->
     <footer>
         <div class="footer-content">
-            <div class="footer-logo"><i class="fa-solid fa-fire-flame-curved"></i> Early Fire Detection</div>
-            <p>Developed by Asude Dila Açıkgöz, İlknur Nazlı Koşar and Serhat Erdoğan. Supervised by Fatma Yerlikaya
-                Özkurt & Kadir Durdu.</p>
-            <p>Ankara Yıldırım Beyazıt University | Department of Computer Engineering | TUSAŞ LIFT-UP</p>
+            <div class="footer-logo"> Early Fire Detection and Mapping</div>
+
+            <div class="footer-sponsor-logos">
+                <img src="aybu-logo.png" alt="Ankara Yıldırım Beyazıt University">
+                <img src="tusas-logo.png" alt="Turkish Aerospace">
+            </div>
+
+            <p>Developed by Asude Dila Açıkgöz, İlknur Nazlı Koşar and Serhat Erdoğan.</p>
+            <p>Supervised by Fatma Yerlikaya
+                Özkurt & Kadir Durdu. </p>
+            <p>Ankara Yıldırım Beyazıt University | Department of Computer Engineering | TUSAŞ
+                LIFT-UP</p>
         </div>
     </footer>
 
