@@ -381,7 +381,8 @@ def main():
                             altitude_m=base_result.get("altitude_m"),
                             horizontal_fov_deg=73.7,
                             vertical_fov_deg=53.1,
-                            drone_yaw_deg=base_result.get("drone_yaw") or 0.0
+                            drone_yaw_deg=base_result.get("drone_yaw") or 0.0,
+                            gimbal_pitch_deg=base_result.get("gimbal_pitch") or -90.0
                         )
 
                         approx_area_m2 = estimate_area_from_pixel_area(
@@ -434,7 +435,7 @@ def main():
                         "track_best_latitude": best_lat,
                         "track_best_longitude": best_lon,
                         "approx_area_m2": approx_area_m2,
-                        "area_method": "centroid_gsd_fov_altitude",
+                        "area_method": "centroid_gsd_fov_altitude_gimbal_pitch",
                         "fire_track_id": fire_track_id,
                         "alerted": should_alert
                     })

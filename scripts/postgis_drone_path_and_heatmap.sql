@@ -25,6 +25,7 @@ SELECT
     fire_track_id,
     ST_SetSRID(ST_MakePoint(longitude, latitude), 4326) AS geom,
     last_probability,
+    (COALESCE(last_probability, 0) * LN(1 + GREATEST(COALESCE(observations, 0), 0))) AS heatmap_weight,
     last_video_time_s,
     observations,
     max_area_m2,

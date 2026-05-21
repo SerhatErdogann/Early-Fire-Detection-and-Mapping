@@ -1,39 +1,63 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<sld:StyledLayerDescriptor xmlns="http://www.opengis.net/sld" xmlns:sld="http://www.opengis.net/sld" xmlns:ogc="http://www.opengis.net/ogc" xmlns:gml="http://www.opengis.net/gml" version="1.0.0">
-    <sld:NamedLayer>
-        <sld:Name>fire_heatmap</sld:Name>
-        <sld:UserStyle>
-            <sld:Name>fire_heatmap</sld:Name>
-            <sld:FeatureTypeStyle>
-                <sld:Transformation>
-                    <ogc:Function name="gs:Heatmap">
+<StyledLayerDescriptor version="1.0.0"
+    xmlns="http://www.opengis.net/sld"
+    xmlns:ogc="http://www.opengis.net/ogc"
+    xmlns:xlink="http://www.w3.org/1999/xlink"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.opengis.net/sld http://schemas.opengis.net/sld/1.0.0/StyledLayerDescriptor.xsd">
+    <NamedLayer>
+        <Name>fire_heatmap</Name>
+        <UserStyle>
+            <Name>fire_heatmap</Name>
+            <Title>Fire Heatmap</Title>
+            <FeatureTypeStyle>
+                <Transformation>
+                    <ogc:Function name="vec:Heatmap">
                         <ogc:Function name="parameter">
                             <ogc:Literal>data</ogc:Literal>
                         </ogc:Function>
                         <ogc:Function name="parameter">
                             <ogc:Literal>weightAttr</ogc:Literal>
-                            <ogc:Literal>last_probability</ogc:Literal>
+                            <ogc:Literal>heatmap_weight</ogc:Literal>
                         </ogc:Function>
                         <ogc:Function name="parameter">
                             <ogc:Literal>radiusPixels</ogc:Literal>
-                            <ogc:Literal>150</ogc:Literal>
+                            <ogc:Literal>300</ogc:Literal>
+                        </ogc:Function>
+                        <ogc:Function name="parameter">
+                            <ogc:Literal>outputBBOX</ogc:Literal>
+                            <ogc:Function name="env">
+                                <ogc:Literal>wms_bbox</ogc:Literal>
+                            </ogc:Function>
+                        </ogc:Function>
+                        <ogc:Function name="parameter">
+                            <ogc:Literal>outputWidth</ogc:Literal>
+                            <ogc:Function name="env">
+                                <ogc:Literal>wms_width</ogc:Literal>
+                            </ogc:Function>
+                        </ogc:Function>
+                        <ogc:Function name="parameter">
+                            <ogc:Literal>outputHeight</ogc:Literal>
+                            <ogc:Function name="env">
+                                <ogc:Literal>wms_height</ogc:Literal>
+                            </ogc:Function>
                         </ogc:Function>
                     </ogc:Function>
-                </sld:Transformation>
-                <sld:Rule>
-                    <sld:RasterSymbolizer>
-                        <sld:Opacity>0.7</sld:Opacity>
-                        <sld:ColorMap type="ramp">
-                            <sld:ColorMapEntry color="#00000000" quantity="0" opacity="0"/>
-                            <sld:ColorMapEntry color="#0000FF" quantity="0.2" opacity="0.4"/>
-                            <sld:ColorMapEntry color="#00FFFF" quantity="0.4" opacity="0.5"/>
-                            <sld:ColorMapEntry color="#00FF00" quantity="0.6" opacity="0.6"/>
-                            <sld:ColorMapEntry color="#FFFF00" quantity="0.8" opacity="0.7"/>
-                            <sld:ColorMapEntry color="#FF0000" quantity="1.0" opacity="0.8"/>
-                        </sld:ColorMap>
-                    </sld:RasterSymbolizer>
-                </sld:Rule>
-            </sld:FeatureTypeStyle>
-        </sld:UserStyle>
-    </sld:NamedLayer>
-</sld:StyledLayerDescriptor>
+                </Transformation>
+                <Rule>
+                    <RasterSymbolizer>
+                        <Opacity>0.85</Opacity>
+                        <ColorMap type="ramp">
+                            <ColorMapEntry color="#00000000" quantity="0" opacity="0"/>
+                            <ColorMapEntry color="#0000FF" quantity="0.2" opacity="0.4"/>
+                            <ColorMapEntry color="#00FFFF" quantity="0.4" opacity="0.5"/>
+                            <ColorMapEntry color="#00FF00" quantity="0.6" opacity="0.6"/>
+                            <ColorMapEntry color="#FFFF00" quantity="0.8" opacity="0.7"/>
+                            <ColorMapEntry color="#FF0000" quantity="1.0" opacity="0.9"/>
+                        </ColorMap>
+                    </RasterSymbolizer>
+                </Rule>
+            </FeatureTypeStyle>
+        </UserStyle>
+    </NamedLayer>
+</StyledLayerDescriptor>

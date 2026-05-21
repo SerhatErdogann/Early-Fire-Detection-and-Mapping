@@ -55,15 +55,15 @@ def pixel_to_geo_point(
     altitude_m,
     horizontal_fov_deg=73.7,
     vertical_fov_deg=53.1,
-    drone_yaw_deg=0.0
+    drone_yaw_deg=0.0,
+    gimbal_pitch_deg=-90.0,
 ):
     """
     Görüntüdeki bir piksel noktasını yaklaşık lat/lon noktasına çevirir.
 
     Varsayımlar:
-    - Kamera yaklaşık yere bakıyor.
+    - Kamera yere yakın bakıyor; gimbal pitch görüntü merkezinin ileri kaymasını düzeltir.
     - Zemin düz kabul ediliyor.
-    - Drone GPS görüntü merkezine karşılık geliyor.
     - FOV değerleri yaklaşık.
     """
 
@@ -87,6 +87,14 @@ def pixel_to_geo_point(
 
     dx_m = dx_pixel * meters_per_pixel_x
     dy_m = dy_pixel * meters_per_pixel_y
+
+    # DJI gimbal pitch: -90 derece nadir/asagi, 0 derece ufuk.
+    # Kamera tam asagi bakmiyorsa goruntu merkezi drone altina degil, yaw yonunde ileriye duser.
+    # Bu basit duzeltme flat-ground ray intersection yaklasiminin pratik bir halidir.
+    if gimbal_pitch_deg is not None:
+        nadir_angle_deg = abs(float(gimbal_pitch_deg))
+        if 1.0 < nadir_angle_deg < 89.5:
+            dy_m += altitude_m / math.tan(math.radians(nadir_angle_deg))
 
     world_dx_m, world_dy_m = rotate_offset(
         dx_m,
