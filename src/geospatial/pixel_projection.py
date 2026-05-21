@@ -28,18 +28,19 @@ def rotate_offset(dx_m, dy_m, yaw_deg):
     Kamera/görüntü koordinatındaki offset'i drone yaw açısına göre döndürür.
 
     Basit kabul:
-    - yaw_deg 0 ise görüntü yukarısı kuzeye bakıyor kabul edilir.
+    - DJI yaw 0 ise görüntü yukarısı kuzeye bakıyor kabul edilir.
+    - DJI yaw saat yönünde artar: 90 derece doğu yönüdür.
     - dx: sağ yön
     - dy: yukarı yön
 
     Not:
-    DJI yaw yorumuna göre ileride gerekirse işaret kalibrasyonu yapılır.
+    Kamera yaklaşık nadir (-90 gimbal pitch) kabul edilir.
     """
 
     yaw_rad = math.radians(yaw_deg)
 
-    world_dx = dx_m * math.cos(yaw_rad) - dy_m * math.sin(yaw_rad)
-    world_dy = dx_m * math.sin(yaw_rad) + dy_m * math.cos(yaw_rad)
+    world_dx = dx_m * math.cos(yaw_rad) + dy_m * math.sin(yaw_rad)
+    world_dy = -dx_m * math.sin(yaw_rad) + dy_m * math.cos(yaw_rad)
 
     return world_dx, world_dy
 

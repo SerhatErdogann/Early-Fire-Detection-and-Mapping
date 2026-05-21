@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DJI Multimodal Fire Detection Dashboard</title>
+    <!-- Google Fonts for Modern Typography -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --panel-bg: rgba(30, 41, 59, 0.85);
+            --text-color: #f8fafc;
+            --accent-glow: #ef4444;
+            --border-color: rgba(255, 255, 255, 0.1);
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Sidebar Styling */
+        #sidebar {
+            width: 320px;
+            background: var(--panel-bg);
+            backdrop-filter: blur(12px);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            padding: 24px;
+            z-index: 1000;
+            box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
+        }
+
+        h1 {
+            font-size: 20px;
+            font-weight: 700;
+            margin-top: 0;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        h1::before {
+            content: '';
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            background-color: var(--accent-glow);
+            border-radius: 50%;
+            box-shadow: 0 0 10px var(--accent-glow), 0 0 20px var(--accent-glow);
+            animation: pulse 2s infinite;
+        }
+
+        .subtitle {
+            font-size: 13px;
+            color: #94a3b8;
+            margin-bottom: 32px;
+            line-height: 1.5;
+        }
+
+        /* Stat Cards */
+        .stat-card {
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+            transition: transform 0.2s;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .stat-title {
+            font-size: 12px;
+            text-transform: uppercase;
+            color: #94a3b8;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .stat-value {
+            font-size: 28px;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .stat-value.danger {
+            color: #ef4444;
+            text-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
+        }
+
+        .heatmap-scale {
+            height: 14px;
+            border-radius: 999px;
+            background: linear-gradient(90deg, #2563eb 0%, #22c55e 30%, #facc15 58%, #f97316 78%, #ef4444 100%);
+            box-shadow: 0 0 14px rgba(239, 68, 68, 0.25);
+            margin: 10px 0 8px;
+        }
+
+        .heatmap-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 10px;
+            color: #cbd5e1;
+            margin-bottom: 10px;
+        }
+
+        .heatmap-note {
+            font-size: 11px;
+            color: #94a3b8;
+            line-height: 1.45;
+        }
+
+        .heatmap-note strong {
+            color: #f8fafc;
+        }
+
+        /* Map Container */
+        #map {
+            flex-grow: 1;
+            height: 100%;
+            background: #000;
+        }
+
+        /* Loading Overlay */
+        #loader {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-weight: 600;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 12px 24px;
+            border-radius: 30px;
+            z-index: 2000;
+            backdrop-filter: blur(4px);
+        }
+
+        @keyframes pulse {
+            0% {
+                transform: scale(0.95);
+                opacity: 0.8;
+            }
+
+            50% {
+                transform: scale(1.1);
+                opacity: 1;
+            }
+
+            100% {
+                transform: scale(0.95);
+                opacity: 0.8;
+            }
+        }
+
+        /* Custom Leaflet Dark Popup */
+        .leaflet-popup-content-wrapper {
+            background: var(--panel-bg);
+            color: #fff;
+            border: 1px solid var(--border-color);
+            backdrop-filter: blur(8px);
+            border-radius: 8px;
+        }
+
+        .leaflet-popup-tip {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="sidebar">
+        <h1>Fire AI Radar</h1>
+        <div class="subtitle">Real-time drone monitoring & environmental risk integration.</div>
+
+        <div class="stat-card">
+            <div class="stat-title">Total Scanned Frames</div>
+            <div class="stat-value" id="val-total">--</div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-title">Fire Detected Frames</div>
+            <div class="stat-value danger" id="val-fire">--</div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-title">No Fire Frames</div>
+            <div class="stat-value" id="val-no-fire">--</div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-title">Max Fire Probability</div>
+            <div class="stat-value" id="val-max">--%</div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-title">Heatmap Risk Intensity Scale</div>
+            <div class="heatmap-scale"></div>
+            <div class="heatmap-labels">
+                <span>Low</span>
+                <span>Moderate</span>
+                <span>High</span>
+                <span>Critical</span>
+            </div>
+            <div class="heatmap-note">
+                Heatmap colors combine <strong>fire probability</strong>, repeated observations and spatial density.
+                Blue/green areas are weak signals; orange/red areas indicate persistent high-risk fire activity.
+            </div>
+        </div>
+
+        <div style="flex-grow:1;"></div>
+        <div style="font-size: 11px; color: #64748b; text-align: center;">
+            Powered by PostGIS & GeoServer
+        </div>
+    </div>
+
+    <div id="map"></div>
+    <div id="loader">Syncing telemetry data...</div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const GEOSERVER_WMS_URL = {{ geoserver_wms_url|tojson }};
+        const LAYER_ACTIVE_FIRE = {{ layer_active_fire|tojson }};
+        const LAYER_DRONE_PATH = {{ layer_drone_path|tojson }};
+        const LAYER_FIRE_HEATMAP = {{ layer_fire_heatmap|tojson }};
+
+        // 1. Haritayi Olustur (Dark Mode Basemap)
+        const map = L.map('map', {
+            zoomControl: false,
+            maxZoom: 24
+        }).setView([0, 0], 2);
+
+        L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+        // --- Farkli Harita Altliklari (Basemaps) ---
+        const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap',
+            maxZoom: 24,
+            maxNativeZoom: 19
+        });
+
+        const darkLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; CartoDB',
+            maxZoom: 24,
+            maxNativeZoom: 19
+        });
+
+        const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+            attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
+            maxZoom: 24,
+            maxNativeZoom: 19
+        });
+
+        // Varsayilan olarak Dark Layer acik olsun (Sitenin temasiyla uyumlu)
+        darkLayer.addTo(map);
+
+        // WMS katmanlari icin baslangic parametreleri (Dinamik Boyutlandirma)
+        const initialZoom = map.getZoom();
+        const getEnvString = (zoom) => {
+            let trackSize = Math.max(2, Math.round(zoom * 0.8));
+            let droneSmall = Math.max(2, Math.round(zoom * 0.25));
+            let droneLarge = Math.max(3, Math.round(zoom * 0.35));
+            let heatRad = Math.max(15, Math.round(zoom * 5));
+            return `track_size:${trackSize};drone_size_small:${droneSmall};drone_size_large:${droneLarge};heatmap_radius:${heatRad}`;
+        };
+
+        // --- EN DOĞRU ÇÖZÜM: TEK PARÇA WMS (Double Buffering ile) ---
+        L.SingleWMSOverlay = L.Layer.extend({
+            options: { url: '', layers: '', format: 'image/png', transparent: true, version: '1.1.0', env: '', _t: '' },
+            initialize: function(options) { L.setOptions(this, options); },
+            onAdd: function(map) {
+                this._map = map;
+                this._overlays = []; 
+                
+                // Layer sadece şu eventlerde yenilensin:
+                map.on("moveend", this._update, this);
+                map.on("zoomend", this._update, this);
+                map.on("resize", this._update, this);
+                
+                this._update();
+            },
+            onRemove: function(map) {
+                map.off("moveend", this._update, this);
+                map.off("zoomend", this._update, this);
+                map.off("resize", this._update, this);
+                if (this._updateTimer) clearTimeout(this._updateTimer);
+                this._overlays.forEach(layer => map.removeLayer(layer));
+                this._overlays = [];
+            },
+            _update: function() {
+                // Zoom bittiginde ayni anda hem zoomend hem moveend calisabilir. 
+                // Ust uste binmesini ve Leaflet'in animasyon hatalarini onlemek icin 50ms Debounce (Geciktirici) ekliyoruz
+                if (this._updateTimer) clearTimeout(this._updateTimer);
+                this._updateTimer = setTimeout(() => this._doUpdate(), 50);
+            },
+            _doUpdate: function() {
+                if (!this._map) return;
+                const bounds = this._map.getBounds();
+                const size = this._map.getSize();
+                const crs = this._map.options.crs;
+                const nw = crs.project(bounds.getNorthWest());
+                const se = crs.project(bounds.getSouthEast());
+                const bbox = `${nw.x},${se.y},${se.x},${nw.y}`; 
+                
+                const width = Math.round(size.x);
+                const height = Math.round(size.y);
+                
+                const params = new URLSearchParams({
+                    service: 'WMS',
+                    request: 'GetMap',
+                    version: this.options.version,
+                    layers: this.options.layers,
+                    format: this.options.format,
+                    transparent: String(this.options.transparent),
+                    width: String(width),
+                    height: String(height),
+                    srs: 'EPSG:3857',
+                    bbox: bbox,
+                    env: this.options.env || '',
+                    _t: this.options._t || ''
+                });
+                const url = `${this.options.url}?${params.toString()}`;
+                
+                const newOverlay = L.imageOverlay(url, bounds, {opacity: 1, interactive: false});
+                
+                // Yarış durumunu (Race Condition) onlemek icin bu istegi kaydediyoruz
+                this._currentRequest = newOverlay;
+                
+                newOverlay.on('load', () => {
+                    // Eger araya baska bir kaydirma girdiyse (bu resim eskidiyse), haritaya ekleme!
+                    if (this._currentRequest !== newOverlay) {
+                        if (this._map.hasLayer(newOverlay)) this._map.removeLayer(newOverlay);
+                        return;
+                    }
+                    
+                    this._overlays.forEach(layer => {
+                        if (layer !== newOverlay && this._map.hasLayer(layer)) {
+                            this._map.removeLayer(layer);
+                        }
+                    });
+                    this._overlays = [newOverlay];
+                });
+
+                newOverlay.addTo(this._map);
+                this._overlays.push(newOverlay);
+            },
+            setParams: function(params, noRedraw) {
+                if (params.env) this.options.env = params.env;
+                if (params._t !== undefined) this.options._t = params._t;
+                if (!noRedraw) {
+                    this._update();
+                }
+            }
+        });
+
+        // 2. GeoServer'dan Yeni Katmanlari Ekle
+        
+        // A. Drone Yolu (Mavi Kesikli Çizgi)
+        const dronePathLayer = new L.SingleWMSOverlay({
+            url: GEOSERVER_WMS_URL,
+            layers: LAYER_DRONE_PATH,
+            env: getEnvString(initialZoom),
+            styles: 'drone_path_line'
+        });
+
+        // B. Yangın Isı Haritası (Arka Plan) - Varsayılan KAPALI
+        const fireHeatmapLayer = new L.SingleWMSOverlay({
+            url: GEOSERVER_WMS_URL,
+            layers: LAYER_FIRE_HEATMAP,
+            env: getEnvString(initialZoom),
+            styles: 'fire_heatmap'
+        });
+
+        // C. Aktif Yangın Noktaları (Kırmızı Daireler)
+        const activeFireTracksLayer = new L.SingleWMSOverlay({
+            url: GEOSERVER_WMS_URL,
+            layers: LAYER_ACTIVE_FIRE,
+            env: getEnvString(initialZoom),
+            styles: 'active_fire_tracks_style'
+        });
+        activeFireTracksLayer.addTo(map);
+
+        // Harita her yakinlasip uzaklastiginda (zoom) WMS boyutlarini guncelle!
+        map.on('zoomend', function () {
+            const newEnv = getEnvString(map.getZoom());
+            dronePathLayer.setParams({ env: newEnv }, false);
+            fireHeatmapLayer.setParams({ env: newEnv }, false);
+            activeFireTracksLayer.setParams({ env: newEnv }, false);
+        });
+
+        // 3. Etkilesimli Yangin Noktalari (GeoJSON ile Görünmez Tıklama Alanı)
+        let fireGeoJSONLayer = L.geoJSON(null, {
+            pointToLayer: function (feature, latlng) {
+                // GeoJSON noktasini tamamen seffaf (gorunmez) yapiyoruz.
+                // Gorsel olarak GeoServer'in WMS cizimi gorunecek, bu sadece tiklanabilmesi icin arka planda alan yaratacak!
+                return L.circle(latlng, {
+                    radius: 20,
+                    fillColor: "#000000",
+                    color: "#000000",
+                    weight: 0,
+                    opacity: 0,        // TAMAMEN SEFFAF
+                    fillOpacity: 0     // TAMAMEN SEFFAF
+                });
+            },
+            onEachFeature: function (feature, layer) {
+                const props = feature.properties;
+                const imgUrl = props.image_url || (props.resim_adi ? `/frames/${encodeURIComponent(props.resim_adi)}` : '');
+
+                const popupContent = `
+                    <div style="text-align:center; min-width: 220px;">
+                        ${imgUrl ? `<img src="${imgUrl}" style="width: 100%; border-radius: 8px; border: 1px solid #334155; margin-bottom: 10px;" alt="Fire Frame">` : '<div style="padding:20px; color:#94a3b8;">Goruntu Yok</div>'}
+                        <div style="font-size: 14px;"><strong>Risk Skoru:</strong> %${props.yangin_yuzdesi}</div>
+                        <div style="font-size: 12px; color: #94a3b8; margin-top: 5px;">${props.zaman}</div>
+                        <a href="https://www.google.com/maps?q=${feature.geometry.coordinates[1]},${feature.geometry.coordinates[0]}" target="_blank" style="display: block; margin-top: 10px; background: #3b82f6; color: white; padding: 8px; text-decoration: none; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer;">
+                            Google Maps'te Aç
+                        </a>
+                    </div>
+                `;
+                layer.bindPopup(popupContent, { maxWidth: 300, className: 'custom-popup' });
+                // Mouseover kaldirildi, sadece tiklayinca acilacak.
+            }
+        });
+
+        // "Yangın Noktaları" secenegini actiginizda hem WMS gorseli hem de gorunmez tiklama alani aktif olur
+        const activeFireGroup = L.layerGroup([activeFireTracksLayer, fireGeoJSONLayer]).addTo(map);
+
+        // --- Katman Kontrol Paneli (Sag Ust Kose) ---
+        const baseMaps = {
+            "Siyah Tema (Dark)": darkLayer,
+            "Uydu Görüntüsü": satelliteLayer,
+            "Standart Harita (OSM)": osmLayer
+        };
+
+        const overlayMaps = {
+            "Drone Yolu": dronePathLayer,
+            "Yangın Noktaları": activeFireGroup,
+            "Yangın Heatmap": fireHeatmapLayer
+        };
+
+        L.control.layers(baseMaps, overlayMaps, { position: 'topright' }).addTo(map);
+
+        // 4. Veritabanindan Istatistikleri ve Dinamik Lokasyonu Cek
+        let lastFrameCount = -1;
+        let isFirstLoad = true;
+
+        function updateDashboard() {
+            fetch('/api/stats')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('loader').style.display = 'none';
+
+                    if (data.status === 'success') {
+                        // Sadece eger yeni bir veri geldiyse arayuzu ve haritayi guncelle
+                        if (lastFrameCount !== data.stats.toplam) {
+                            lastFrameCount = data.stats.toplam;
+
+                            // Paneli Guncelle
+                            document.getElementById('val-total').innerText = data.stats.toplam;
+                            document.getElementById('val-fire').innerText = data.stats.yangin;
+                            document.getElementById('val-no-fire').innerText = data.stats.yangin_degil;
+                            document.getElementById('val-max').innerText = data.stats.max_yuzde + '%';
+
+                            // GeoServer'dan gelen harita resmini tazelemeye zorla
+                            const t = Date.now();
+                            dronePathLayer.setParams({ _t: t }, false);
+                            fireHeatmapLayer.setParams({ _t: t }, false);
+                            activeFireTracksLayer.setParams({ _t: t }, false);
+
+                            // Etkilesimli Yangin resimlerini getir
+                            fetch('/api/fire-points')
+                                .then(r => r.json())
+                                .then(geojson => {
+                                    if (geojson.status === 'error' || geojson.type !== 'FeatureCollection') {
+                                        throw new Error(geojson.message || 'Invalid GeoServer WFS response');
+                                    }
+                                    fireGeoJSONLayer.clearLayers();
+                                    fireGeoJSONLayer.addData(geojson);
+                                })
+                                .catch(err => {
+                                    console.error("Fire point WFS error:", err);
+                                });
+
+                            // Haritayi ilk yuklemede noktalara odaklar
+                            if (isFirstLoad) {
+                                const bounds = L.latLngBounds(data.bounds[0], data.bounds[1]);
+                                map.fitBounds(bounds, { padding: [50, 50], maxZoom: 18 });
+                                isFirstLoad = false;
+                            }
+                        }
+                    } else {
+                        console.error("Veri alinamadi:", data.message);
+                        document.getElementById('loader').style.display = 'block';
+                        document.getElementById('loader').innerText = data.message || "GeoServer baglanti hatasi!";
+                    }
+                })
+                .catch(err => {
+                    console.error("Fetch Hatasi:", err);
+                    if (isFirstLoad) {
+                        document.getElementById('loader').innerText = "Baglanti hatasi!";
+                    }
+                });
+        }
+
+        // Ilk yuklemeyi hemen yap
+        updateDashboard();
+
+        // Her 2 saniyede bir arka planda sessizce yeni veri var mi diye kontrol et
+        setInterval(updateDashboard, 2000);
+    </script>
+</body>
+
+</html>

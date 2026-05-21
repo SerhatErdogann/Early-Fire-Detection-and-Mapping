@@ -200,14 +200,15 @@ def main():
     )
 
     fire_tracker = FireTracker(
-        match_distance_m=40.0,
-        max_missing_frames=60
+        match_distance_m=45.0,
+        max_missing_frames=60,
+        pixel_area_tolerance=250,
+        pixel_area_ratio_tolerance=0.50
     )
 
-    track_alert_cooldown = {}
     ALERT_LOCATION_HISTORY = []
-    ALERT_COOLDOWN_FRAMES = 15
-    ALERT_MIN_DISTANCE_M = 40
+    ALERT_COOLDOWN_SECONDS = 10.0
+    ALERT_MIN_DISTANCE_M = 45
 
     processed_count = 0
     frame_idx = 0
@@ -397,21 +398,22 @@ def main():
                             fire_lon=fire_lon,
                             frame_idx=frame_idx,
                             approx_area_m2=approx_area_m2,
-                            fire_probability=fire_prob
+                            fire_probability=fire_prob,
+                            pixel_area=region["pixel_area"]
                         )
 
                     should_alert = True
                     if fire_lat is not None and fire_lon is not None:
                         for prev in ALERT_LOCATION_HISTORY:
                             dist = haversine_distance_m(fire_lat, fire_lon, prev["lat"], prev["lon"])
-                            if dist < ALERT_MIN_DISTANCE_M and (frame_idx - prev["frame"]) < ALERT_COOLDOWN_FRAMES:
+                            if dist < ALERT_MIN_DISTANCE_M and (video_time_s - prev["time_s"]) < ALERT_COOLDOWN_SECONDS:
                                 should_alert = False
                                 break
                     if should_alert:
-                        ALERT_LOCATION_HISTORY.append({"lat": fire_lat, "lon": fire_lon, "frame": frame_idx})
+                        ALERT_LOCATION_HISTORY.append({"lat": fire_lat, "lon": fire_lon, "time_s": video_time_s})
                         ALERT_LOCATION_HISTORY[:] = [
                             x for x in ALERT_LOCATION_HISTORY
-                            if (frame_idx - x["frame"]) < ALERT_COOLDOWN_FRAMES
+                            if (video_time_s - x["time_s"]) < ALERT_COOLDOWN_SECONDS
                         ]
 
                     result = base_result.copy()

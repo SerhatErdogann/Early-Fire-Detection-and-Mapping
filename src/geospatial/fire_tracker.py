@@ -32,13 +32,21 @@ class FireTracker:
     Konum olarak en şiddetli (en büyük alan) gözlem kullanılır.
     """
 
-    def __init__(self, match_distance_m=25.0, max_missing_frames=10):
+    def __init__(
+        self,
+        match_distance_m=25.0,
+        max_missing_frames=10,
+        pixel_area_tolerance=100,
+        pixel_area_ratio_tolerance=0.30,
+    ):
         self.match_distance_m = match_distance_m
         self.max_missing_frames = max_missing_frames
+        self.pixel_area_tolerance = pixel_area_tolerance
+        self.pixel_area_ratio_tolerance = pixel_area_ratio_tolerance
         self.tracks = {}
         self.next_id = 1
 
-    def update(self, fire_lat, fire_lon, frame_idx, approx_area_m2=None, fire_probability=None):
+    def update(self, fire_lat, fire_lon, frame_idx, approx_area_m2=None, fire_probability=None, pixel_area=None):
         """
         Yeni fire point'i mevcut track ile eşleştirir veya yeni track açar.
         Konum olarak en büyük alana sahip gözlem saklanır.
@@ -60,11 +68,20 @@ class FireTracker:
             distance = haversine_distance_m(
                 fire_lat,
                 fire_lon,
-                track["latitude"],
-                track["longitude"]
+                track["last_latitude"],
+                track["last_longitude"]
             )
 
-            if distance <= self.match_distance_m:
+            pixel_area_matches = True
+            if pixel_area is not None and track.get("last_pixel_area") is not None:
+                last_pixel_area = float(track["last_pixel_area"])
+                allowed_delta = max(
+                    float(self.pixel_area_tolerance),
+                    abs(last_pixel_area) * float(self.pixel_area_ratio_tolerance),
+                )
+                pixel_area_matches = abs(float(pixel_area) - last_pixel_area) <= allowed_delta
+
+            if distance <= self.match_distance_m and pixel_area_matches:
                 if best_distance is None or distance < best_distance:
                     best_distance = distance
                     best_track_id = track_id
@@ -77,11 +94,14 @@ class FireTracker:
                 "track_id": track_id,
                 "latitude": fire_lat,
                 "longitude": fire_lon,
+                "last_latitude": fire_lat,
+                "last_longitude": fire_lon,
                 "first_frame_idx": frame_idx,
                 "last_frame_idx": frame_idx,
                 "observations": 1,
                 "max_area_m2": approx_area_m2,
                 "last_area_m2": approx_area_m2,
+                "last_pixel_area": pixel_area,
                 "max_probability": fire_probability,
                 "last_probability": fire_probability
             }
@@ -99,6 +119,9 @@ class FireTracker:
         track["last_frame_idx"] = frame_idx
         track["observations"] += 1
         track["last_area_m2"] = approx_area_m2
+        track["last_pixel_area"] = pixel_area
+        track["last_latitude"] = fire_lat
+        track["last_longitude"] = fire_lon
         track["last_probability"] = fire_probability
 
         if fire_probability is not None:
