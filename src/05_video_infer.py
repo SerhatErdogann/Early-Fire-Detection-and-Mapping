@@ -1,24 +1,22 @@
 """
-Final video inference entrypoint (auto fusion -> rgb -> thermal fallback).
+Video inference entrypoint (gated dual-branch fusion on models/dual_branch.pt).
 
 Examples:
   python src/05_video_infer.py --rgb_video path/to/rgb.mp4 --th_video path/to/th.mp4
   python src/05_video_infer.py --rgb_video path/to/rgb.mp4
-  python src/05_video_infer.py --th_video path/to/th.mp4
 """
 import argparse
 from pathlib import Path
 import sys
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.inference.video import run_video_inference
 
 try:
-    from config import CKPT_FUSION, CKPT_RGB, CKPT_THERMAL, INFERENCE_DEFAULT, OUTPUTS_DIR
+    from config import CKPT_DUAL_BRANCH, INFERENCE_DEFAULT, OUTPUTS_DIR
 except ImportError:
-    CKPT_FUSION = Path("models/fusion.pt")
-    CKPT_RGB = Path("models/rgb.pt")
-    CKPT_THERMAL = Path("models/thermal.pt")
+    CKPT_DUAL_BRANCH = Path("models/dual_branch.pt")
     INFERENCE_DEFAULT = {
         "smooth_window": 7,
         "ema_alpha": 0.30,
@@ -51,9 +49,13 @@ def main():
     )
     ap.add_argument("--override_thr", type=float, default=None)
     ap.add_argument("--size", type=int, default=224)
-    ap.add_argument("--model_fusion", default=str(CKPT_FUSION))
-    ap.add_argument("--model_rgb", default=str(CKPT_RGB))
-    ap.add_argument("--model_thermal", default=str(CKPT_THERMAL))
+    ap.add_argument(
+        "--model",
+        "--model_fusion",
+        dest="model",
+        default=str(CKPT_DUAL_BRANCH),
+        help="Gated fusion checkpoint (default models/dual_branch.pt)",
+    )
     ap.add_argument("--out", default=str(OUTPUTS_DIR / "video_predictions.csv"))
     ap.add_argument("--save_heatmaps", action="store_true")
     ap.add_argument("--save_masks", action="store_true", help="Save EMA-smoothed soft mask PNGs")
@@ -96,12 +98,11 @@ def main():
     ap.add_argument("--modal-agreement", action="store_true", default=idf.get("enable_modal_agreement", False))
     ap.add_argument("--modal-min-corr", type=float, default=idf.get("modal_agreement_min_corr", 0.2))
     ap.add_argument("--modal-penalty", type=float, default=idf.get("modal_agreement_penalty", 0.6))
-    # adaptive-step can be enabled/disabled explicitly
     ap.add_argument(
         "--adaptive-step",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Enable/disable adaptive frame step based on motion/risk",
+        help="Deprecated (ignored); DroneRTStreamPolicy handles selective inference.",
     )
     ap.add_argument("--adaptive-min-step", type=int, default=idf.get("adaptive_min_step", 1))
     ap.add_argument("--adaptive-max-step", type=int, default=idf.get("adaptive_max_step", 12))
@@ -130,7 +131,7 @@ def main():
     ap.add_argument(
         "--auto-step-long-video",
         action="store_true",
-        help="If duration exceeds --long-video-seconds, grow step_frames (capped).",
+        help="Deprecated (ignored).",
     )
     ap.add_argument("--long-video-seconds", type=float, default=600.0)
     ap.add_argument("--long-video-step-scale", type=float, default=2.0)
@@ -150,19 +151,19 @@ def main():
     ap.add_argument(
         "--no-alarm-feed-export",
         action="store_true",
-        help="Mapping/GIS downstream: alarm_feed CSV+JSONL yazılmasın.",
+        help="Mapping/GIS downstream: alarm_feed CSV+JSONL yazilmasin.",
     )
     ap.add_argument(
         "--target-infer-hz",
         type=float,
         default=1.0,
-        help="Seçici çıkarım: hedef yaklaşık model çağrı sıklığı (Hz). Drone/canlı için ~1 önerilir.",
+        help="Selective inference target model call rate (Hz).",
     )
     ap.add_argument(
         "--max-infer-gap-sec",
         type=float,
         default=1.0,
-        help="Kalp atımı: güvenlik için bu süreyi geçmeden çıkarımsız kalmayı engelle.",
+        help="Heartbeat: max seconds without an inference pass.",
     )
     args = ap.parse_args()
 
@@ -172,9 +173,7 @@ def main():
     out_csv = run_video_inference(
         rgb_video_path=args.rgb_video,
         th_video_path=args.th_video,
-        ckpt_fusion=args.model_fusion,
-        ckpt_rgb=args.model_rgb,
-        ckpt_thermal=args.model_thermal,
+        ckpt_path=args.model,
         mode=args.mode,
         size=args.size,
         step_frames=args.step,

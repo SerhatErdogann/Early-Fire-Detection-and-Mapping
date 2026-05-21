@@ -7,7 +7,7 @@ Features
   numeric ``test_realistic_recall`` (restart-safe; legacy rows may still expose ``test_recall``).
 - After each successful train: copy checkpoint to ``models/by_experiment/{slug}.pt``
   so ``select_best_and_report.py`` can pick the *correct* weights (canonical
-  ``dual_branch.pt`` / ``fusion.pt`` are overwritten each run).
+  ``dual_branch.pt`` is overwritten each run).
 - Run ``robustness_eval`` + ``ablation_eval`` per experiment; archive CSVs under
   ``outputs/kaggle_eval_archive/`` and refresh ``outputs/robustness_eval.csv`` /
   ``outputs/ablation_suite.csv`` with the latest run.
@@ -49,8 +49,7 @@ def _slug_experiment_name(name: str) -> str:
 
 
 def _canonical_ckpt(models_dir: Path, model_family: str) -> Path:
-    if str(model_family) == "early_fusion":
-        return models_dir / "fusion.pt"
+    _ = model_family  # always archive from dual_branch.pt product path
     return models_dir / "dual_branch.pt"
 
 
@@ -133,63 +132,13 @@ def _run_capture(cmd: list[str], cwd: Path, env: dict) -> tuple[int, str]:
 
 
 def _experiments_catalog() -> list[dict]:
-    """Ordered experiment grid (edit below for your notebook)."""
+    """Gated fusion experiment grid."""
     fusion_common = ["--selection_metric", "recall_fpr", "--loss_mode", "balanced_sampler", "--loss_name", "cb_focal"]
+    gf = "dual_branch_gated_fusion"
     return [
         {
-            "experiment_name": "kaggle_early_fusion_effnet",
-            "model_family": "early_fusion",
-            "extra_args": fusion_common.copy(),
-            "notes": "Single-encoder 4-channel baseline",
-        },
-        {
-            "experiment_name": "kaggle_dbf_baseline_rcfpr",
-            "model_family": "dual_branch_fusion",
-            "extra_args": fusion_common.copy(),
-            "notes": "Dual-branch concat baseline + recall/FPR metric",
-        },
-        {
-            "experiment_name": "kaggle_dbf_strengthened",
-            "model_family": "dual_branch_fusion",
-            "extra_args": fusion_common.copy()
-            + [
-                "--modal_dropout_p",
-                "0.15",
-                "--thermal_lr_mult",
-                "1.25",
-                "--freeze_rgb_epochs",
-                "2",
-                "--thermal_norm",
-                "train_zscore",
-            ],
-            "notes": "Modal dropout + thermal LR + warmup + train_zscore",
-        },
-        {
-            "experiment_name": "kaggle_dbf_attn",
-            "model_family": "dual_branch_attention_fusion",
-            "extra_args": fusion_common.copy()
-            + [
-                "--modal_dropout_p",
-                "0.25",
-                "--thermal_lr_mult",
-                "1.25",
-                "--freeze_rgb_epochs",
-                "2",
-                "--thermal_norm",
-                "train_zscore",
-            ],
-            "notes": "Attention fusion variant",
-        },
-        {
-            "experiment_name": "kaggle_dbf_mid_res50",
-            "model_family": "dual_branch_mid_fusion",
-            "extra_args": fusion_common.copy()
-            + ["--backbone", "resnet50", "--modal_dropout_p", "0.18", "--thermal_lr_mult", "1.15", "--freeze_rgb_epochs", "2", "--thermal_norm", "train_zscore"],
-            "notes": "Mid fusion heavier path",
-        },
-        {
             "experiment_name": "kaggle_dbf_gated_primary",
-            "model_family": "dual_branch_gated_fusion",
+            "model_family": gf,
             "extra_args": fusion_common.copy()
             + [
                 "--modal_dropout_p",
@@ -205,7 +154,7 @@ def _experiments_catalog() -> list[dict]:
         },
         {
             "experiment_name": "kaggle_dbf_gated_md02_fr2",
-            "model_family": "dual_branch_gated_fusion",
+            "model_family": gf,
             "extra_args": fusion_common.copy()
             + [
                 "--modal_dropout_p",
@@ -221,7 +170,7 @@ def _experiments_catalog() -> list[dict]:
         },
         {
             "experiment_name": "kaggle_dbf_gated_md03_fr1",
-            "model_family": "dual_branch_gated_fusion",
+            "model_family": gf,
             "extra_args": fusion_common.copy()
             + [
                 "--modal_dropout_p",
@@ -237,7 +186,7 @@ def _experiments_catalog() -> list[dict]:
         },
         {
             "experiment_name": "kaggle_cmp_th_percentile",
-            "model_family": "dual_branch_fusion",
+            "model_family": gf,
             "extra_args": fusion_common.copy()
             + [
                 "--thermal_norm",
@@ -247,7 +196,7 @@ def _experiments_catalog() -> list[dict]:
         },
         {
             "experiment_name": "kaggle_cmp_th_train_zscore",
-            "model_family": "dual_branch_fusion",
+            "model_family": gf,
             "extra_args": fusion_common.copy()
             + [
                 "--thermal_norm",
@@ -257,7 +206,7 @@ def _experiments_catalog() -> list[dict]:
         },
         {
             "experiment_name": "kaggle_cmp_th_minmax",
-            "model_family": "dual_branch_fusion",
+            "model_family": gf,
             "extra_args": fusion_common.copy()
             + [
                 "--thermal_norm",
@@ -267,7 +216,7 @@ def _experiments_catalog() -> list[dict]:
         },
         {
             "experiment_name": "kaggle_cmp_loss_focal_shuffle",
-            "model_family": "dual_branch_fusion",
+            "model_family": gf,
             "extra_args": [
                 "--selection_metric",
                 "recall_fpr",
@@ -282,13 +231,13 @@ def _experiments_catalog() -> list[dict]:
         },
         {
             "experiment_name": "kaggle_cmp_loss_sampler_focal_ce",
-            "model_family": "dual_branch_fusion",
+            "model_family": gf,
             "extra_args": ["--selection_metric", "recall_fpr", "--loss_mode", "sampler_focal", "--loss_name", "ce", "--thermal_norm", "train_zscore"],
             "notes": "Loss: sampler_ce-style path with sampler_focal mode + CE",
         },
         {
             "experiment_name": "kaggle_cmp_loss_sampler_ce_plain",
-            "model_family": "dual_branch_fusion",
+            "model_family": gf,
             "extra_args": ["--selection_metric", "recall_fpr", "--loss_mode", "sampler_ce", "--loss_name", "ce", "--thermal_norm", "train_zscore"],
             "notes": "Loss: weighted sampler + plain CE",
         },
@@ -317,11 +266,6 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-skip-done", action="store_true")
     ap.add_argument("--no-eval", action="store_true", help="Skip robustness/ablation after each train.")
-    ap.add_argument(
-        "--robustness-stress",
-        action="store_true",
-        help="After the default sev-1 sweep, also run outputs/robustness_stress_eval.csv with --severities 1,2,3 (debug).",
-    )
     ap.add_argument("--no-select-best", action="store_true")
     ap.add_argument("--only", default="", help="Regex; only experiments whose name matches.")
     ap.add_argument("--list", action="store_true", help="Print experiment grid and exit.")
@@ -462,7 +406,6 @@ def main() -> int:
             slug = _slug_experiment_name(ename)
             rob_out = archive_dir / f"robustness__{slug}.csv"
             ab_out = archive_dir / f"ablation__{slug}.csv"
-            stress_out: Path | None = None
 
             rob_cmd = [
                 py,
@@ -474,8 +417,6 @@ def main() -> int:
                 csv_arg,
                 "--split",
                 "test",
-                "--severities",
-                "1",
                 "--out",
                 str(rob_out),
             ]
@@ -508,38 +449,6 @@ def main() -> int:
                     },
                 )
 
-            if rob_rc == 0 and args.robustness_stress:
-                stress_out = archive_dir / f"robustness_stress__{slug}.csv"
-                stress_cmd = [
-                    py,
-                    "-m",
-                    "src.eval.robustness_eval",
-                    "--ckpt",
-                    str(ckpt_canon),
-                    "--csv",
-                    csv_arg,
-                    "--split",
-                    "test",
-                    "--severities",
-                    "1,2,3",
-                    "--out",
-                    str(stress_out),
-                ]
-                print("+", " ".join(stress_cmd), flush=True)
-                str_rc, str_blob = _run_capture(stress_cmd, cwd=code_root, env=env_base)
-                if str_rc != 0:
-                    _append_fail_row(
-                        logs_dir,
-                        {
-                            "ts_utc": datetime.now(timezone.utc).isoformat(),
-                            "experiment_name": ename,
-                            "stage": "robustness_stress_eval",
-                            "exit_code": str(str_rc),
-                            "message": str_blob[:1800],
-                            "command": json.dumps(stress_cmd, ensure_ascii=False),
-                        },
-                    )
-
             print("+", " ".join(ab_cmd), flush=True)
             ab_rc, ab_blob = _run_capture(ab_cmd, cwd=code_root, env=env_base)
             ab_rc_s = str(ab_rc)
@@ -559,8 +468,6 @@ def main() -> int:
             try:
                 if rob_out.is_file():
                     shutil.copy2(rob_out, outs / "robustness_eval.csv")
-                if stress_out is not None and stress_out.is_file():
-                    shutil.copy2(stress_out, outs / "robustness_stress_eval.csv")
                 if ab_out.is_file():
                     shutil.copy2(ab_out, outs / "ablation_suite.csv")
             except Exception as exc:

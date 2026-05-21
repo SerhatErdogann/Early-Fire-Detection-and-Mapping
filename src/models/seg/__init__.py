@@ -1,3 +1,3 @@
-from .unet import UNet2D
+"""Segmentation models (reserved; production classifier uses cls/ gated fusion)."""
 
-__all__ = ["UNet2D"]
+__all__: list[str] = []

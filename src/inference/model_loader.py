@@ -1,9 +1,6 @@
 """Checkpoint loader shared by inference scripts.
 
-Restores classifiers saved by ``trainer.py``:
-
-- Dual-branch families (plain / gated / attention / mid) via ``make_classifier``
-- Early fusion (4-channel single trunk) and RGB/Thermal baselines via ``make_model``
+Restores the production ``dual_branch_gated_fusion`` classifier saved by ``trainer.py``.
 """
 from __future__ import annotations
 
@@ -14,33 +11,44 @@ import torch
 from torch import nn
 
 try:
-    from src.models import FUSION_DUAL_FAMILIES, make_classifier
-    from src.models.backbones import make_model
+    from src.models import make_classifier
 except ImportError:
-    from ..models import FUSION_DUAL_FAMILIES, make_classifier
-    from ..models.backbones import make_model
+    from ..models import make_classifier
+
+
+class UnsupportedCheckpointError(RuntimeError):
+    """Raised when a checkpoint is not a gated dual-branch fusion model."""
+
+
+def _has_state_prefix(state: dict[str, Any], prefix: str) -> bool:
+    return any(isinstance(k, str) and k.startswith(prefix) for k in state.keys())
 
 
 def _infer_model_family_from_state(state: dict[str, Any], mf_from_ckpt: str) -> str:
+    """Return canonical family name or raise if the weights are unsupported."""
     mf = str(mf_from_ckpt or "").lower().strip()
-    if mf:
+    if mf == "dual_branch_gated_fusion":
         return mf
-    keys = state.keys()
-    if not isinstance(keys, (list, set, tuple)):
-        keys = list(keys)
-
-    def _has_prefix(prefix: str) -> bool:
-        return any(isinstance(k, str) and k.startswith(prefix) for k in keys)
-
-    if _has_prefix("gate_mlp."):
+    if _has_state_prefix(state, "gate_mlp."):
         return "dual_branch_gated_fusion"
-    if _has_prefix("rgb_proj."):
-        return "dual_branch_attention_fusion"
-    if _has_prefix("mid_fuse.") or _has_prefix("rgb_fx."):
-        return "dual_branch_mid_fusion"
-    if _has_prefix("rgb_branch."):
-        return "dual_branch_fusion"
-    return mf
+    legacy_hits: list[str] = []
+    if _has_state_prefix(state, "rgb_proj."):
+        legacy_hits.append("dual_branch_attention_fusion")
+    if _has_state_prefix(state, "mid_fuse.") or _has_state_prefix(state, "rgb_fx."):
+        legacy_hits.append("dual_branch_mid_fusion")
+    if _has_state_prefix(state, "rgb_branch.") and not _has_state_prefix(state, "gate_mlp."):
+        legacy_hits.append("dual_branch_fusion / non-gated")
+    if mf and mf not in ("", "dual_branch_gated_fusion"):
+        legacy_hits.append(f"saved tag {mf_from_ckpt!r}")
+    if legacy_hits or mf:
+        raise UnsupportedCheckpointError(
+            "Unsupported checkpoint architecture. This build loads only dual_branch_gated_fusion weights. "
+            f"Detected: {', '.join(legacy_hits) or 'unknown'}. Retrain or export with the gated model."
+        )
+    raise UnsupportedCheckpointError(
+        "Checkpoint is missing gated fusion weights (expected keys starting with gate_mlp.) "
+        "and model_family was not dual_branch_gated_fusion."
+    )
 
 
 def _thermal_init_from_ckpt(ckpt: dict[str, Any]) -> str:
@@ -59,21 +67,17 @@ def load_checkpoint(ckpt_path) -> Tuple[nn.Module, str, str, float, float]:
     state = ckpt["state"]
     raw_mf = ckpt.get("model_family") or ckpt.get("arch") or ""
     model_family = _infer_model_family_from_state(state, str(raw_mf))
-    in_ch = int(ckpt.get("in_ch", 3))
     backbone = str(ckpt.get("backbone", "resnet18"))
     tin = _thermal_init_from_ckpt(ckpt)
 
-    if model_family in FUSION_DUAL_FAMILIES:
-        model = make_classifier(
-            model_family,
-            backbone,
-            "fusion",
-            num_classes=2,
-            pretrained=False,
-            thermal_init=tin,
-        ).to(device)
-    else:
-        model = make_model(backbone, in_ch, pretrained=False).to(device)
+    model = make_classifier(
+        model_family,
+        backbone,
+        "fusion",
+        num_classes=2,
+        pretrained=False,
+        thermal_init=tin,
+    ).to(device)
     model.load_state_dict(state)
     model.eval()
     thr = float(ckpt.get("threshold", 0.5))
@@ -89,16 +93,14 @@ def route_checkpoint_for_video(
 ) -> tuple[str | None, str | None, str | None, str]:
     """Map one UI-selected checkpoint to ``run_video_inference`` arguments.
 
-    RGB-only workflows still use dual-branch checkpoints: ``video.py`` feeds a
-    zero thermal plane into the fusion model (see ``mode_used == "rgb"`` branch).
+    RGB-only workflows use the gated fusion checkpoint with a zero thermal plane
+    (see ``video.py``, ``mode_used == "rgb"``).
 
     Returns ``(ckpt_fusion, ckpt_rgb, ckpt_thermal, mode)``.
     """
     p = Path(str(ckpt_path))
     if not p.is_file():
-        if has_thermal_video:
-            return str(ckpt_path), None, None, "fusion"
-        return None, str(ckpt_path), None, "rgb"
+        return str(ckpt_path), None, None, ("fusion" if has_thermal_video else "rgb")
 
     try:
         cpu_ckpt = torch.load(p, map_location="cpu", weights_only=True)
@@ -107,14 +109,5 @@ def route_checkpoint_for_video(
 
     state = cpu_ckpt.get("state") or {}
     raw_mf = cpu_ckpt.get("model_family") or cpu_ckpt.get("arch") or ""
-    mf = _infer_model_family_from_state(state, str(raw_mf))
-    mf_l = mf.lower().strip()
-    in_ch = int(cpu_ckpt.get("in_ch", 3))
-
-    if mf_l in FUSION_DUAL_FAMILIES:
-        return str(p), None, None, ("fusion" if has_thermal_video else "rgb")
-    if mf_l == "thermal_baseline" or in_ch == 1:
-        return None, None, str(p), "thermal"
-    if mf_l == "early_fusion" or in_ch == 4:
-        return str(p), None, None, ("fusion" if has_thermal_video else "rgb")
-    return None, str(p), None, "rgb"
+    _infer_model_family_from_state(state, str(raw_mf))
+    return str(p), None, None, ("fusion" if has_thermal_video else "rgb")

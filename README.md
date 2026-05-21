@@ -4,7 +4,7 @@ RGB + termal görüntü füzyonu kullanan yangın/no-fire sınıflandırıcısı
 
 ## Bileşenler
 
-- **Eğitim:** `src/02_train.py` → `src/training/trainer.py`. Dual-branch, gated / attention / mid fusion varyantları; `train_zscore` termal normalize; recall–FPR seçim metrikleri; experiment CSV loglama (`--experiment_log_csv`, `--experiment_name`).
+- **Eğitim:** `src/02_train.py` → `src/training/trainer.py`. Tek üretim mimarisi: gated dual-branch fusion; `train_zscore` termal normalize; recall–FPR seçim metrikleri; experiment CSV loglama (`--experiment_log_csv`, `--experiment_name`).
 - **Çıkarım:** `src/05_video_infer.py` (CLI) ve `src/inference/video.py` — RTSP/HTTP ve yerel dosya (`src/inference/capture_utils.py`); uzun videoda otomatik frame adımı; EMA + hareketli ortalama karışımı ve ardışık‑kare burst bayrağı.
 - **Risk skoru:** `src/06_add_risk_score.py` (CLI) ve `src/risk/scoring.py` — pred CSV’ye zamansal/uzamsal risk.
 - **Olay çıkarma:** `src/eval/event_extractor.py` — alarm sürekliliğinden event listesi.
@@ -12,7 +12,7 @@ RGB + termal görüntü füzyonu kullanan yangın/no-fire sınıflandırıcısı
 - **Ablation:** `src/eval/ablation_eval.py` — fusion checkpoint üzerinde RGB/thermal sıfırlama ve koşullu metrikleri CSV’ye yazar (`outputs/ablation_suite.csv` için runner ile uyumludur).
 - **Robustness:** `src/eval/robustness_eval.py` — corrupted input ile offline değerlendirme (**üretim akışına girmez**).
 - **Leakage kontrol:** `scripts/check_leakage.py` — indeks bölmeleri üzerinden sızıntı denetimi.
-- **Öncelikli deney süiti:** `scripts/run_priority_experiment_suite.py` — sıralı gated/attention/mid fusion eğitimleri, robustness/ablation + teşhis çıktıları.
+- **Öncelikli deney süiti:** `scripts/run_priority_experiment_suite.py` — gated fusion eğitimi, ardından robustness/ablation ve teşhis çıktıları.
 - **Kaggle tam süit:** `scripts/run_kaggle_full_suite.py` — grid eğitim, tamamlanan `experiment_name` atlama, `logs/failed_runs.csv`, arşivlenmiş checkpoint (`models/by_experiment/`), otomatik `select_best`.
 - **En iyi model raporu:** `scripts/select_best_and_report.py` — `improve_results.csv` yoksa (yerel) çıkış **0** ve kısa stub **Markdown**. CSV varken rapor **üç öneri**: `best_recall_model`, `best_low_false_alarm_model`, `best_balanced_model` (tek “kazanan” yok). Varsayılan olarak `kaggle_gated_anticollapse_safe_v1` dışlanır. `best_balanced` → `best_model.pt` (`--no_copy_ckpt` ile yalnızca rapor).
 
@@ -40,7 +40,7 @@ conda activate fire-detection-py311
 python src/01_build_master_index.py
 python scripts/check_leakage.py
 
-python src/02_train.py --mode fusion --model_family dual_branch_fusion --epochs 25 --backbone resnet50
+python src/02_train.py --mode fusion --model_family dual_branch_gated_fusion --epochs 25 --backbone resnet50
 
 streamlit run src/07_ui.py
 ```
@@ -110,7 +110,7 @@ python scripts/run_priority_experiment_suite.py --dry_run \
 
 | Bayrak | Açıklama |
 |--------|-----------|
-| `--model_family` | `early_fusion`, `dual_branch_fusion`, `dual_branch_gated_fusion`, `dual_branch_attention_fusion`, `dual_branch_mid_fusion` |
+| `--model_family` | `dual_branch_gated_fusion` (only) |
 | `--selection_metric` | `realistic` (varsayılan; protocol-noisy val üzerinden bileşik), `f1_balacc`, `recall_fpr` |
 | `--thermal_norm` | `percentile`, `minmax`, `uint16_div`, `train_zscore` |
 | `--modal_dropout_p` | Füzyon modalite dropout olasılığı |
@@ -156,7 +156,7 @@ Kaggle’da yolları `/kaggle/working/outputs/...` ve `/kaggle/working/models/..
 - **Bölme & sızıntı:** `split_group`; `flame_video_nofire` pair politikası README’deki özetle uyumlu. İndeks değişiminden sonra `scripts/check_leakage.py`.
 - **Kaynak-duyarlı eşik taraması** ve benzeri ağır diagnostics **JSON/metrics** çıktısından kaldırıldı (operasyonel protokole odaklı sade çıktı).
 - **Augmentation:** Yalnızca **train** loader’da (RGB jitter/blur/erase; termal fotoğrafik + random patch). **Train’de** termal tensöre **Gaussian additive noise uygulanmaz** (temiz öğrenme yüzeyi). RGB dalı için `--rgb_aug_intensity` varsayılanı **1.15** (hafif güçlendirilmiş RGB invariance; checkpoint’teki fusion/thermal ayarları ve modal dropout aynı şekilde korunur).
-- **Eval protokolü:** Doğrulama ve test metrikleri yalnızca **tek operasyonel bant**: RGB/fusion için `gauss_noise_rgb`, thermal için `gauss_noise_thermal`, **severity 1**, yalnızca **eval forward**. `metrics_*.json` ve `improve_results.csv`: `val_realistic_*`, `test_realistic_*` (F1, recall, FPR). Geriye uyum: JSON’da `val` / `test` / `test_noisy` anahtarları aynı operasyonel sözlüğü gösterir. **Laboratuvar clean** (`val_clean`, `test_clean`) ve **`test_stress` paketi** kaldırıldı. Daha geniş bozunma izi için: `python -m src.eval.robustness_eval --legacy-grid` (clean + corruption×severity grid).
+- **Eval protokolü (realistic):** Doğrulama ve test metrikleri yalnızca **çok hafif Gaussian blur** (`gaussian_blur`, severity **1**, düşük sigma / küçük çekirdek), yalnızca **eval forward** (hafif defocus / titreşim). `metrics_*.json` ve `improve_results.csv`: `val_realistic_*`, `test_realistic_*` (F1, recall, FPR). Geriye uyumluluk: JSON’da `val` / `test` / `test_noisy` aynı realistic sözlüğe işaret eder. Clean-only ayrı bant, stress ızgara ve brightness/noise tabanlı protokol kaldırıldı; `robustness_eval` varsayılanı bu tek protokoldür.
 
 ## Robustness CLI (offline)
 

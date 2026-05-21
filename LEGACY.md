@@ -13,8 +13,9 @@ Do not treat these directories as the source of truth for the current inference 
 
 Current source of truth:
 
-- Video inference: `src/05_video_infer.py`, `src/inference/video.py`
-- Live/geospatial inference: `src/live_video_fire_pipeline.py`, `src/inference/unified_pipeline.py`
+- Video inference + GIS alarm feed: `src/05_video_infer.py`, `src/inference/video.py`, `src/inference/downstream_alarm_feed.py`
+- Streamlit UI: `src/07_ui.py`, `src/ui/`
+- Training: `src/02_train.py`, `models/dual_branch.pt` (`dual_branch_gated_fusion`)
 - Fuel scoring: `src/risk/fuel_scorer.py`
 - Risk scoring: `src/06_add_risk_score.py`, `src/risk/scoring.py`
 - Tests: `tests/`

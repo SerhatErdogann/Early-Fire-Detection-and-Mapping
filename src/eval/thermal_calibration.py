@@ -33,9 +33,7 @@ def _default_metrics_path(ck: dict) -> Path:
         OUTPUTS_DIR = Path("outputs")
     mode = str(ck.get("mode") or "fusion").lower()
     mf_raw = ck.get("model_family")
-    mf = str(mf_raw).lower().strip() if mf_raw else "dual_branch_fusion"
-    if mf == "early_fusion" and mode == "fusion":
-        return Path(OUTPUTS_DIR) / "metrics_fusion.json"
+    mf = str(mf_raw).lower().strip() if mf_raw else "dual_branch_gated_fusion"
     return Path(OUTPUTS_DIR) / f"metrics_{mode}_{mf}.json"
 
 

@@ -1,18 +1,23 @@
 # src/08_fire_mask_export.py
+"""Export fire masks/overlays from video_predictions.csv (post-inference utility)."""
+
+from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import cv2
 import pandas as pd
 
-from segmentation.thermal_threshold import create_fire_mask_from_thermal
-from segmentation.contours import extract_fire_regions
-from segmentation.visualization import (
-    draw_fire_regions_on_frame,
-    overlay_mask_on_frame
-)
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from src.segmentation.contours import extract_fire_regions
+from src.segmentation.thermal_threshold import create_fire_mask_from_thermal
+from src.segmentation.visualization import draw_fire_regions_on_frame, overlay_mask_on_frame
 
 
 def find_frame_column(df):

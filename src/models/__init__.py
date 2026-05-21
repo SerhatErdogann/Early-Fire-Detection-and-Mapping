@@ -1,20 +1,9 @@
-from .backbones import bare_resnet_for_features, make_model, get_model_config
-from .cls.dual_branch_fusion import DualBranchFusion
-from .cls.fusion_variants import (
-    DualBranchAttentionFusion,
-    DualBranchGatedFusion,
-    DualBranchMidFusion,
-)
+from .backbones import get_model_config
+from .cls.dual_branch_gated_fusion import DualBranchGatedFusion
 
 
-FUSION_DUAL_FAMILIES = frozenset(
-    {
-        "dual_branch_fusion",
-        "dual_branch_gated_fusion",
-        "dual_branch_attention_fusion",
-        "dual_branch_mid_fusion",
-    }
-)
+# Kept as a singleton set for readability in trainer / loaders.
+FUSION_DUAL_FAMILIES = frozenset({"dual_branch_gated_fusion"})
 
 
 def make_classifier(
@@ -26,64 +15,31 @@ def make_classifier(
     *,
     thermal_init: str = "mean_rgb",
 ):
-    """
-    model_family: rgb_baseline | thermal_baseline | early_fusion |
-        dual_branch_fusion | dual_branch_gated_fusion |
-        dual_branch_attention_fusion | dual_branch_mid_fusion
-    mode: rgb | thermal | fusion (controls input channels for dataset)
-    """
-    mf = (model_family or "early_fusion").lower()
+    """Build the RGB+thermal gated dual-branch classifier (``mode`` must be fusion)."""
+    mf = (model_family or "dual_branch_gated_fusion").lower().strip()
+    if mf != "dual_branch_gated_fusion":
+        raise ValueError(
+            f"Unsupported model_family={model_family!r}; this project ships only dual_branch_gated_fusion."
+        )
+    m = (mode or "fusion").lower().strip()
+    if m != "fusion":
+        raise ValueError(f"Unsupported mode={mode!r}; only fusion (4-channel RGB+thermal) is supported.")
     bb = (backbone or "resnet50").lower()
     allowed = {"resnet18", "resnet50", "efficientnet_b0", "efficientnet-b0", "efficientnetb0"}
+    if bb not in allowed:
+        raise ValueError("dual_branch_gated_fusion requires resnet18 / resnet50 / efficientnet_b0.")
     tin = str(thermal_init or "mean_rgb")
-
-    if mf == "dual_branch_fusion":
-        if bb not in allowed:
-            raise ValueError(
-                "dual_branch_fusion supports backbone resnet18, resnet50 or efficientnet_b0."
-            )
-        return DualBranchFusion(
-            backbone=bb,
-            num_classes=num_classes,
-            pretrained=pretrained,
-            thermal_init=tin,
-        )
-    if mf == "dual_branch_gated_fusion":
-        if bb not in allowed:
-            raise ValueError("dual_branch_gated_fusion requires resnet18 / resnet50 / efficientnet_b0.")
-        return DualBranchGatedFusion(
-            backbone=bb,
-            num_classes=num_classes,
-            pretrained=pretrained,
-            thermal_init=tin,
-        )
-    if mf == "dual_branch_attention_fusion":
-        if bb not in allowed:
-            raise ValueError("dual_branch_attention_fusion requires resnet18 / resnet50 / efficientnet_b0.")
-        return DualBranchAttentionFusion(
-            backbone=bb,
-            num_classes=num_classes,
-            pretrained=pretrained,
-            thermal_init=tin,
-        )
-    if mf == "dual_branch_mid_fusion":
-        if bb not in ("resnet18", "resnet50"):
-            raise ValueError("dual_branch_mid_fusion only supports resnet18 or resnet50.")
-        return DualBranchMidFusion(
-            backbone=bb,
-            num_classes=num_classes,
-            pretrained=pretrained,
-            thermal_init=tin,
-        )
-
-    in_ch, _ = get_model_config(mode)
-    return make_model(backbone, in_ch, num_classes=num_classes, pretrained=pretrained)
+    return DualBranchGatedFusion(
+        backbone=bb,
+        num_classes=num_classes,
+        pretrained=pretrained,
+        thermal_init=tin,
+    )
 
 
 __all__ = [
-    "make_model",
     "get_model_config",
     "make_classifier",
-    "DualBranchFusion",
+    "DualBranchGatedFusion",
     "FUSION_DUAL_FAMILIES",
 ]

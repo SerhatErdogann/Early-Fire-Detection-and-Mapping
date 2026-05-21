@@ -36,7 +36,7 @@ def run_analysis_pipeline(
 
     a = preset_args
 
-    ckpt_fusion, ckpt_rgb, ckpt_thermal, vid_mode = route_checkpoint_for_video(
+    ckpt_resolved, _, _, vid_mode = route_checkpoint_for_video(
         str(ckpt_path),
         has_thermal_video=bool(th_path and str(th_path).strip()),
     )
@@ -44,9 +44,7 @@ def run_analysis_pipeline(
     run_video_inference(
         rgb_video_path=rgb_path,
         th_video_path=th_path,
-        ckpt_fusion=ckpt_fusion,
-        ckpt_rgb=ckpt_rgb,
-        ckpt_thermal=ckpt_thermal,
+        ckpt_path=ckpt_resolved or str(ckpt_path),
         mode=vid_mode,
         size=int(a.get("size", 224)),
         step_frames=int(a.get("step", 6)),
